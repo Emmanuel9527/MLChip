@@ -30,6 +30,7 @@ SC_MODULE(Router)
     // Allocation state for packet-level output locking.
     int vc_state[PORT_NUM][VC_NUM];
     int out_port_lock[PORT_NUM];
+    int output_rr_start[PORT_NUM];
     int rx_current_vc[PORT_NUM];
     int router_id;
 
@@ -155,68 +156,92 @@ SC_MODULE(Router)
         }
     }
 
-    // Route and switch-allocation stage.
+    // Route and switch-allocation stage with one round-robin arbiter per output.
     void route_thread()
     {
-        int rr_start = 0;
-
         while (true)
         {
-            for (int k = 0; k < PORT_NUM; k++)
+            bool input_used[PORT_NUM];
+            for (int i = 0; i < PORT_NUM; i++)
+                input_used[i] = false;
+
+            for (int out = 0; out < PORT_NUM; out++)
             {
-                int i = (rr_start + k) % PORT_NUM;
-                bool input_used = false;
+                if (!out_has_space(out))
+                    continue;
 
-                for (int v = 0; v < VC_NUM; v++)
+                int grant_input = -1;
+                int grant_vc = -1;
+
+                for (int k = 0; k < PORT_NUM; k++)
                 {
-                    if (input_used)
-                        break;
-
-                    if (in_q[i][v].empty())
+                    int i = (output_rr_start[out] + k) % PORT_NUM;
+                    if (input_used[i])
                         continue;
 
-                    sc_lv<34> f = in_q[i][v].front();
-                    int type = f.range(33, 32).to_uint();
-
-                    if (vc_state[i][v] == -1)
+                    for (int v = 0; v < VC_NUM; v++)
                     {
-                        if (type != 2)
-                        {
-                            in_q[i][v].pop();
+                        if (in_q[i][v].empty())
                             continue;
+
+                        sc_lv<34> f = in_q[i][v].front();
+                        int type = f.range(33, 32).to_uint();
+
+                        if (vc_state[i][v] == -1)
+                        {
+                            if (type != 2)
+                            {
+                                in_q[i][v].pop();
+                                continue;
+                            }
+
+                            int dest_id = f.range(31, 16).to_uint();
+                            int target_out = get_xy_route(router_id, dest_id);
+
+                            if (target_out != out)
+                                continue;
+
+                            if (out_port_lock[out] == -1)
+                            {
+                                out_port_lock[out] = encode_lock(i, v);
+                                vc_state[i][v] = out;
+                            }
+                            else
+                            {
+                                continue;
+                            }
                         }
 
-                        int dest_id = f.range(31, 16).to_uint();
-                        int target_out = get_xy_route(router_id, dest_id);
-
-                        if (out_port_lock[target_out] == -1)
+                        if (vc_state[i][v] == out && out_port_lock[out] == encode_lock(i, v))
                         {
-                            out_port_lock[target_out] = encode_lock(i, v);
-                            vc_state[i][v] = target_out;
-                        }
-                        else
-                        {
-                            continue;
+                            grant_input = i;
+                            grant_vc = v;
+                            break;
                         }
                     }
 
-                    int target_out = vc_state[i][v];
-                    if (out_port_lock[target_out] == encode_lock(i, v) && out_has_space(target_out))
-                    {
-                        out_q[target_out].push(f);
-                        in_q[i][v].pop();
-                        input_used = true;
+                    if (grant_input != -1)
+                        break;
+                }
 
-                        if (type == 1)
-                        {
-                            out_port_lock[target_out] = -1;
-                            vc_state[i][v] = -1;
-                        }
+                if (grant_input != -1)
+                {
+                    sc_lv<34> f = in_q[grant_input][grant_vc].front();
+                    int type = f.range(33, 32).to_uint();
+
+                    out_q[out].push(f);
+                    in_q[grant_input][grant_vc].pop();
+                    input_used[grant_input] = true;
+                    output_rr_start[out] = (grant_input + 1) % PORT_NUM;
+
+                    if (type == 1)
+                    {
+                        out_port_lock[out] = -1;
+                        vc_state[grant_input][grant_vc] = -1;
                     }
                 }
             }
 
-            rr_start = (rr_start + 1) % PORT_NUM;
             wait();
         }
     }
@@ -263,6 +288,7 @@ SC_MODULE(Router)
         for (int i = 0; i < PORT_NUM; i++)
         {
             out_port_lock[i] = -1;
+            output_rr_start[i] = 0;
             rx_current_vc[i] = -1;
             out_req[i].initialize(false);
             out_ack[i].initialize(false);
