@@ -32,6 +32,8 @@ SC_MODULE(Router)
     int out_port_lock[PORT_NUM];
     int output_rr_start[PORT_NUM];
     int rx_current_vc[PORT_NUM];
+    bool tx_active[PORT_NUM];
+    sc_lv<34> tx_buffer[PORT_NUM];
     int router_id;
 
     void init(int id)
@@ -99,60 +101,93 @@ SC_MODULE(Router)
         return input_port * VC_NUM + vc;
     }
 
+    bool any_vc_has_space(int p)
+    {
+        for (int v = 0; v < VC_NUM; v++)
+            if (vc_has_space(p, v))
+                return true;
+        return false;
+    }
+
     void rx_thread_0() { rx_logic(0); }
     void rx_thread_1() { rx_logic(1); }
     void rx_thread_2() { rx_logic(2); }
     void rx_thread_3() { rx_logic(3); }
     void rx_thread_4() { rx_logic(4); }
 
-    // RX stage: accept an incoming flit only when the selected VC has space.
+    // RX stage: req is valid and ack is ready.
     void rx_logic(int p)
     {
         while (true)
         {
-            if (in_req[p].read() == 0)
-            {
-                wait();
-                continue;
-            }
+            bool current_ready = out_ack[p].read();
+            bool accepted = false;
+            int accepted_type = -1;
 
-            sc_lv<34> f = in_flit[p].read();
-            int type = f.range(33, 32).to_uint();
-
-            int vc = rx_current_vc[p];
-            if (type == 2)
+            if (in_req[p].read() == 1 && current_ready)
             {
-                int dest_id = f.range(31, 16).to_uint();
-                int target_out = get_xy_route(router_id, dest_id);
-                vc = choose_vc(p, target_out);
-                if (vc == -1)
+                sc_lv<34> f = in_flit[p].read();
+                int type = f.range(33, 32).to_uint();
+                int vc = rx_current_vc[p];
+
+                if (type == 2)
                 {
-                    wait();
-                    continue;
+                    int dest_id = f.range(31, 16).to_uint();
+                    int target_out = get_xy_route(router_id, dest_id);
+                    vc = choose_vc(p, target_out);
                 }
-                rx_current_vc[p] = vc;
+
+                if (vc != -1 && vc_has_space(p, vc))
+                {
+                    if (type == 2)
+                        rx_current_vc[p] = vc;
+
+                    in_q[p][vc].push(f);
+                    accepted = true;
+                    accepted_type = type;
+
+                    if (type == 1)
+                        rx_current_vc[p] = -1;
+                }
             }
-            else if (vc == -1)
+
+            bool next_ready = false;
+            if (accepted)
             {
-                wait();
-                continue;
+                if (accepted_type == 1)
+                    next_ready = any_vc_has_space(p);
+                else if (rx_current_vc[p] != -1)
+                    next_ready = vc_has_space(p, rx_current_vc[p]);
+                else
+                    next_ready = any_vc_has_space(p);
             }
-
-            if (!vc_has_space(p, vc))
+            else if (in_req[p].read() == 1)
             {
-                wait();
-                continue;
+                sc_lv<34> f = in_flit[p].read();
+                int type = f.range(33, 32).to_uint();
+
+                if (type == 2)
+                {
+                    int dest_id = f.range(31, 16).to_uint();
+                    int target_out = get_xy_route(router_id, dest_id);
+                    next_ready = (choose_vc(p, target_out) != -1);
+                }
+                else if (rx_current_vc[p] != -1)
+                {
+                    next_ready = vc_has_space(p, rx_current_vc[p]);
+                }
+                else
+                {
+                    next_ready = false;
+                }
+            }
+            else
+            {
+                next_ready = any_vc_has_space(p);
             }
 
-            in_q[p][vc].push(f);
-
-            out_ack[p].write(1);
-            while (in_req[p].read() == 1)
-                wait();
-            out_ack[p].write(0);
-
-            if (type == 1)
-                rx_current_vc[p] = -1;
+            out_ack[p].write(next_ready);
+            wait();
         }
     }
 
@@ -252,29 +287,34 @@ SC_MODULE(Router)
     void tx_thread_3() { tx_logic(3); }
     void tx_thread_4() { tx_logic(4); }
 
-    // TX stage: drive one output link using the four-phase handshake.
+    // TX stage: req is valid and ack is ready.
     void tx_logic(int p)
     {
         while (true)
         {
-            if (out_q[p].empty())
+            if (tx_active[p] && in_ack[p].read() == 1)
             {
-                wait();
-                continue;
+                out_q[p].pop();
+                tx_active[p] = false;
             }
 
-            sc_lv<34> f = out_q[p].front();
-            out_flit[p].write(f);
-            out_req[p].write(1);
+            if (!tx_active[p] && !out_q[p].empty())
+            {
+                tx_buffer[p] = out_q[p].front();
+                tx_active[p] = true;
+            }
 
-            while (in_ack[p].read() == 0)
-                wait();
+            if (tx_active[p])
+            {
+                out_flit[p].write(tx_buffer[p]);
+                out_req[p].write(1);
+            }
+            else
+            {
+                out_req[p].write(0);
+            }
 
-            out_q[p].pop();
-            out_req[p].write(0);
-
-            while (in_ack[p].read() == 1)
-                wait();
+            wait();
         }
     }
 
@@ -290,8 +330,10 @@ SC_MODULE(Router)
             out_port_lock[i] = -1;
             output_rr_start[i] = 0;
             rx_current_vc[i] = -1;
+            tx_active[i] = false;
+            tx_buffer[i] = zero_flit;
             out_req[i].initialize(false);
-            out_ack[i].initialize(false);
+            out_ack[i].initialize(true);
             out_flit[i].initialize(zero_flit);
 
             for (int v = 0; v < VC_NUM; v++)
