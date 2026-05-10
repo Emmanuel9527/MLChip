@@ -15,17 +15,17 @@ SC_MODULE(Router)
     sc_in<bool> rst;
     sc_in<bool> clk;
 
-    sc_out<sc_lv<34> > out_flit[PORT_NUM];
-    sc_out<bool> out_req[PORT_NUM];
-    sc_in<bool> in_ack[PORT_NUM];
+    sc_out<sc_lv<34>> out_flit[PORT_NUM]; // Output flit data driven to the next router or local core.
+    sc_out<bool> out_req[PORT_NUM];       // Output valid signal; 1 when out_flit carries a valid flit.
+    sc_in<bool> in_ack[PORT_NUM];         // Input ready signal from the downstream receiver.
 
-    sc_in<sc_lv<34> > in_flit[PORT_NUM];
-    sc_in<bool> in_req[PORT_NUM];
-    sc_out<bool> out_ack[PORT_NUM];
+    sc_in<sc_lv<34>> in_flit[PORT_NUM]; // Input flit data from the previous router or local core.
+    sc_in<bool> in_req[PORT_NUM];       // Input valid signal; 1 when in_flit carries a valid flit.
+    sc_out<bool> out_ack[PORT_NUM];     // Output ready signal; 1 when this router can accept a flit.
 
     // Finite logical FIFOs for virtual-channel and output buffering.
-    std::queue<sc_lv<34> > in_q[PORT_NUM][VC_NUM];
-    std::queue<sc_lv<34> > out_q[PORT_NUM];
+    std::queue<sc_lv<34>> in_q[PORT_NUM][VC_NUM];
+    std::queue<sc_lv<34>> out_q[PORT_NUM];
 
     // Allocation state for packet-level output locking.
     int vc_state[PORT_NUM][VC_NUM];
@@ -109,7 +109,7 @@ SC_MODULE(Router)
         return false;
     }
 
-    void clear_flit_queue(std::queue<sc_lv<34> > &q)
+    void clear_flit_queue(std::queue<sc_lv<34>> & q)
     {
         while (!q.empty())
             q.pop();
