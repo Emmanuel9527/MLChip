@@ -33,6 +33,13 @@ SC_MODULE(Core)
     {
         while (true)
         {
+            if (rst.read() == 0)
+            {
+                req_tx.write(false);
+                wait();
+                continue;
+            }
+
             flit_tx.write(flit);
             req_tx.write(1);
 
@@ -50,6 +57,16 @@ SC_MODULE(Core)
     {
         while (true)
         {
+            if (rst.read() == 0)
+            {
+                sc_lv<34> zero_flit;
+                zero_flit = 0;
+                req_tx.write(false);
+                flit_tx.write(zero_flit);
+                wait();
+                continue;
+            }
+
             Packet *packet = pe.get_packet();
             if (packet == NULL)
             {
@@ -94,6 +111,15 @@ SC_MODULE(Core)
 
         while (true)
         {
+            if (rst.read() == 0)
+            {
+                packet = Packet();
+                packet_active = false;
+                ack_rx.write(false);
+                wait();
+                continue;
+            }
+
             ack_rx.write(1);
 
             if (req_rx.read() == 1)

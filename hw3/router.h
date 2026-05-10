@@ -109,6 +109,12 @@ SC_MODULE(Router)
         return false;
     }
 
+    void clear_flit_queue(std::queue<sc_lv<34> > &q)
+    {
+        while (!q.empty())
+            q.pop();
+    }
+
     void rx_thread_0() { rx_logic(0); }
     void rx_thread_1() { rx_logic(1); }
     void rx_thread_2() { rx_logic(2); }
@@ -120,6 +126,14 @@ SC_MODULE(Router)
     {
         while (true)
         {
+            if (rst.read() == 0)
+            {
+                rx_current_vc[p] = -1;
+                out_ack[p].write(false);
+                wait();
+                continue;
+            }
+
             bool current_ready = out_ack[p].read();
             bool accepted = false;
             int accepted_type = -1;
@@ -196,6 +210,25 @@ SC_MODULE(Router)
     {
         while (true)
         {
+            if (rst.read() == 0)
+            {
+                for (int i = 0; i < PORT_NUM; i++)
+                {
+                    out_port_lock[i] = -1;
+                    output_rr_start[i] = 0;
+                    clear_flit_queue(out_q[i]);
+
+                    for (int v = 0; v < VC_NUM; v++)
+                    {
+                        vc_state[i][v] = -1;
+                        clear_flit_queue(in_q[i][v]);
+                    }
+                }
+
+                wait();
+                continue;
+            }
+
             bool input_used[PORT_NUM];
             for (int i = 0; i < PORT_NUM; i++)
                 input_used[i] = false;
@@ -292,6 +325,18 @@ SC_MODULE(Router)
     {
         while (true)
         {
+            if (rst.read() == 0)
+            {
+                sc_lv<34> zero_flit;
+                zero_flit = 0;
+                tx_active[p] = false;
+                tx_buffer[p] = zero_flit;
+                out_req[p].write(false);
+                out_flit[p].write(zero_flit);
+                wait();
+                continue;
+            }
+
             if (tx_active[p] && in_ack[p].read() == 1)
             {
                 out_q[p].pop();
