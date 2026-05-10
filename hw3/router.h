@@ -8,7 +8,10 @@ SC_MODULE(Router)
 {
     static const int PORT_NUM = 5;
     static const int VC_NUM = 2;
+    static const int VC_DEPTH = 16;
+    static const int OUT_DEPTH = 8;
 
+    // Router ports.
     sc_in<bool> rst;
     sc_in<bool> clk;
 
@@ -20,9 +23,11 @@ SC_MODULE(Router)
     sc_in<bool> in_req[PORT_NUM];
     sc_out<bool> out_ack[PORT_NUM];
 
+    // Finite logical FIFOs for virtual-channel and output buffering.
     std::queue<sc_lv<34> > in_q[PORT_NUM][VC_NUM];
     std::queue<sc_lv<34> > out_q[PORT_NUM];
 
+    // Allocation state for packet-level output locking.
     int vc_state[PORT_NUM][VC_NUM];
     int out_port_lock[PORT_NUM];
     int rx_current_vc[PORT_NUM];
@@ -33,6 +38,7 @@ SC_MODULE(Router)
         router_id = id;
     }
 
+    // Deterministic XY routing for a 4x4 mesh.
     int get_xy_route(int current_id, int dest_id)
     {
         int cx = current_id % 4;
@@ -51,13 +57,42 @@ SC_MODULE(Router)
         return 4;
     }
 
-    int choose_vc(int p)
+    // Input VC FIFOs apply backpressure when the selected depth is full.
+    bool vc_has_space(int p, int vc)
     {
-        if (in_q[p][0].size() <= in_q[p][1].size())
+        return in_q[p][vc].size() < VC_DEPTH;
+    }
+
+    // Output FIFOs model finite switch-to-link buffers.
+    bool out_has_space(int p)
+    {
+        return out_q[p].size() < OUT_DEPTH;
+    }
+
+    // Spread traffic directions over two VCs to reduce head-of-line blocking.
+    int preferred_vc_for_output(int target_out)
+    {
+        if (target_out == 2 || target_out == 3)
             return 0;
         return 1;
     }
 
+    // Header flits choose a VC using both output direction and free space.
+    int choose_vc(int p, int target_out)
+    {
+        int preferred = preferred_vc_for_output(target_out);
+        int other = 1 - preferred;
+
+        if (vc_has_space(p, preferred) && in_q[p][preferred].size() <= in_q[p][other].size() + 1)
+            return preferred;
+        if (vc_has_space(p, other))
+            return other;
+        if (vc_has_space(p, preferred))
+            return preferred;
+        return -1;
+    }
+
+    // The output lock stores one input-port and VC pair.
     int encode_lock(int input_port, int vc)
     {
         return input_port * VC_NUM + vc;
@@ -69,6 +104,7 @@ SC_MODULE(Router)
     void rx_thread_3() { rx_logic(3); }
     void rx_thread_4() { rx_logic(4); }
 
+    // RX stage: accept an incoming flit only when the selected VC has space.
     void rx_logic(int p)
     {
         while (true)
@@ -83,10 +119,28 @@ SC_MODULE(Router)
             int type = f.range(33, 32).to_uint();
 
             int vc = rx_current_vc[p];
-            if (type == 2 || vc == -1)
+            if (type == 2)
             {
-                vc = choose_vc(p);
+                int dest_id = f.range(31, 16).to_uint();
+                int target_out = get_xy_route(router_id, dest_id);
+                vc = choose_vc(p, target_out);
+                if (vc == -1)
+                {
+                    wait();
+                    continue;
+                }
                 rx_current_vc[p] = vc;
+            }
+            else if (vc == -1)
+            {
+                wait();
+                continue;
+            }
+
+            if (!vc_has_space(p, vc))
+            {
+                wait();
+                continue;
             }
 
             in_q[p][vc].push(f);
@@ -101,6 +155,7 @@ SC_MODULE(Router)
         }
     }
 
+    // Route and switch-allocation stage.
     void route_thread()
     {
         int rr_start = 0;
@@ -146,7 +201,7 @@ SC_MODULE(Router)
                     }
 
                     int target_out = vc_state[i][v];
-                    if (out_port_lock[target_out] == encode_lock(i, v))
+                    if (out_port_lock[target_out] == encode_lock(i, v) && out_has_space(target_out))
                     {
                         out_q[target_out].push(f);
                         in_q[i][v].pop();
@@ -172,6 +227,7 @@ SC_MODULE(Router)
     void tx_thread_3() { tx_logic(3); }
     void tx_thread_4() { tx_logic(4); }
 
+    // TX stage: drive one output link using the four-phase handshake.
     void tx_logic(int p)
     {
         while (true)
