@@ -80,7 +80,7 @@ SC_MODULE(Router)
         return 1;
     }
 
-    // Header flits choose a VC using both output direction and free space.
+    // Header flits choose a VC using both output direction and free space. considered load balancing.
     int choose_vc(int p, int target_out)
     {
         int preferred = preferred_vc_for_output(target_out);
@@ -138,13 +138,13 @@ SC_MODULE(Router)
             bool accepted = false;
             int accepted_type = -1;
 
-            if (in_req[p].read() == 1 && current_ready)
+            if (in_req[p].read() == 1 && current_ready) // hand shakes
             {
                 sc_lv<34> f = in_flit[p].read();
                 int type = f.range(33, 32).to_uint();
                 int vc = rx_current_vc[p];
 
-                if (type == 2)
+                if (type == 2) // header flit
                 {
                     int dest_id = f.range(31, 16).to_uint();
                     int target_out = get_xy_route(router_id, dest_id);
@@ -156,7 +156,7 @@ SC_MODULE(Router)
                     if (type == 2)
                         rx_current_vc[p] = vc;
 
-                    in_q[p][vc].push(f);
+                    in_q[p][vc].push(f); // body flit will use the same VC as header flit
                     accepted = true;
                     accepted_type = type;
 
@@ -165,20 +165,21 @@ SC_MODULE(Router)
                 }
             }
 
+            // predict the next cycle's ready based on current accept and incoming request, improving throughput by removing pipeline bubbles.
             bool next_ready = false;
             if (accepted)
             {
-                if (accepted_type == 1)
+                if (accepted_type == 1) // tail
                     next_ready = any_vc_has_space(p);
-                else if (rx_current_vc[p] != -1)
+                else if (rx_current_vc[p] != -1) // header or body
                     next_ready = vc_has_space(p, rx_current_vc[p]);
                 else
                     next_ready = any_vc_has_space(p);
             }
-            else if (in_req[p].read() == 1)
+            else if (in_req[p].read() == 1) // not accepted but has incoming request, check if it can be accepted in the next cycle.
             {
                 sc_lv<34> f = in_flit[p].read();
-                int type = f.range(33, 32).to_uint();
+                int type = f.range(33, 32).to_uint(); // peek type for the next cycle.
 
                 if (type == 2)
                 {
@@ -195,7 +196,7 @@ SC_MODULE(Router)
                     next_ready = false;
                 }
             }
-            else
+            else // nobody is sending, just check if we are ready for new packets.
             {
                 next_ready = any_vc_has_space(p);
             }
@@ -214,13 +215,13 @@ SC_MODULE(Router)
             {
                 for (int i = 0; i < PORT_NUM; i++)
                 {
-                    out_port_lock[i] = -1;
-                    output_rr_start[i] = 0;
+                    out_port_lock[i] = -1;  // record the locked input VC for each output port; -1 means no lock.
+                    output_rr_start[i] = 0; // record the next input port to start round-robin arbitration for each output port.
                     clear_flit_queue(out_q[i]);
 
                     for (int v = 0; v < VC_NUM; v++)
                     {
-                        vc_state[i][v] = -1;
+                        vc_state[i][v] = -1; // record the output port allocated for each input VC; -1 means not allocated.
                         clear_flit_queue(in_q[i][v]);
                     }
                 }
@@ -233,7 +234,7 @@ SC_MODULE(Router)
             for (int i = 0; i < PORT_NUM; i++)
                 input_used[i] = false;
 
-            for (int out = 0; out < PORT_NUM; out++)
+            for (int out = 0; out < PORT_NUM; out++) // within the same cycle, each output port tries to find one input VC to grant.
             {
                 if (!out_has_space(out))
                     continue;
@@ -257,7 +258,7 @@ SC_MODULE(Router)
 
                         if (vc_state[i][v] == -1)
                         {
-                            if (type != 2)
+                            if (type != 2) // if it's not a header flit, just pop it and keep looking for the header.
                             {
                                 in_q[i][v].pop();
                                 continue;
@@ -271,7 +272,7 @@ SC_MODULE(Router)
 
                             if (out_port_lock[out] == -1)
                             {
-                                out_port_lock[out] = encode_lock(i, v);
+                                out_port_lock[out] = encode_lock(i, v); // lock this output port to the input VC pair until the tail flit is sent.
                                 vc_state[i][v] = out;
                             }
                             else
@@ -280,6 +281,7 @@ SC_MODULE(Router)
                             }
                         }
 
+                        // final check if this input VC is granted for the output port.
                         if (vc_state[i][v] == out && out_port_lock[out] == encode_lock(i, v))
                         {
                             grant_input = i;
@@ -292,6 +294,7 @@ SC_MODULE(Router)
                         break;
                 }
 
+                // If granted, move the flit from the input VC queue to the output queue, and update states accordingly.
                 if (grant_input != -1)
                 {
                     sc_lv<34> f = in_q[grant_input][grant_vc].front();
@@ -302,7 +305,7 @@ SC_MODULE(Router)
                     input_used[grant_input] = true;
                     output_rr_start[out] = (grant_input + 1) % PORT_NUM;
 
-                    if (type == 1)
+                    if (type == 1) // tail flit, release the lock and VC state after sending.
                     {
                         out_port_lock[out] = -1;
                         vc_state[grant_input][grant_vc] = -1;
@@ -329,21 +332,21 @@ SC_MODULE(Router)
             {
                 sc_lv<34> zero_flit;
                 zero_flit = 0;
-                tx_active[p] = false;
-                tx_buffer[p] = zero_flit;
+                tx_active[p] = false;     // record if there is an active flit being transmitted for p port.
+                tx_buffer[p] = zero_flit; // buffer the current flit being transmitted, so that we can keep driving it until acknowledged.
                 out_req[p].write(false);
                 out_flit[p].write(zero_flit);
                 wait();
                 continue;
             }
 
-            if (tx_active[p] && in_ack[p].read() == 1)
+            if (tx_active[p] && in_ack[p].read() == 1) // handshake success.
             {
                 out_q[p].pop();
                 tx_active[p] = false;
             }
 
-            if (!tx_active[p] && !out_q[p].empty())
+            if (!tx_active[p] && !out_q[p].empty()) // launch a new transmission if there is a pending flit and no active transmission.
             {
                 tx_buffer[p] = out_q[p].front();
                 tx_active[p] = true;
