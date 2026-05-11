@@ -7,40 +7,43 @@
 SC_MODULE(Router)
 {
     /*
-     * Router block map, following the slide:
-     *
-     *   Input Sync -> ElasticBuffer -> Routing Computation
-     *              -> Stall Control / Arbiter -> Crossbar Switch -> Output Sync
-     *
-     * Backward Blocking Selector is modeled by out_ack generation on each input
-     * port. Packet Lock is modeled by out_port_lock[] and vc_state[][].
-     */
+    Router block map:
 
-    static const int PORT_NUM = 5;
-    static const int VC_NUM = 2;
-    static const int VC_DEPTH = 16;
-    static const int OUT_DEPTH = 8;
+    Input Sync -> ElasticBuffer -> Routing Computation
+               -> Stall Control / Arbiter -> Crossbar Switch -> Output Sync
 
+    Backward Blocking Selector is modeled by out_ack generation on each input
+    port. Packet Lock is modeled by out_port_lock[] and vc_state[][].
+    */
+
+    static const int PORT_NUM = 5;  // Number of router ports: North, South, East, West, and Local.
+    static const int VC_NUM = 2;    // Number of virtual channels per input port.
+    static const int VC_DEPTH = 16; // Maximum number of flits stored in each input virtual channel FIFO.
+    static const int OUT_DEPTH = 8; // Maximum number of flits stored in each output-side FIFO.
+
+    // Logical port encoding used by routing computation and switch allocation.
     enum PortId
     {
-        NORTH = 0,
-        SOUTH = 1,
-        EAST = 2,
-        WEST = 3,
-        LOCAL = 4
+        NORTH = 0, // Port connected to the router above this router in the mesh.
+        SOUTH = 1, // Port connected to the router below this router in the mesh.
+        EAST = 2,  // Port connected to the router on the right side of this router.
+        WEST = 3,  // Port connected to the router on the left side of this router.
+        LOCAL = 4  // Port connected to the local processing element / core.
     };
 
+    // Two-bit flit type encoding stored in flit[33:32].
     enum FlitType
     {
-        BODY_FLIT = 0,
-        TAIL_FLIT = 1,
-        HEAD_FLIT = 2
+        BODY_FLIT = 0, // Middle payload flit of a packet.
+        TAIL_FLIT = 1, // Last payload flit; releases the packet-level output lock.
+        HEAD_FLIT = 2  // Header flit; carries destination/source IDs and starts routing allocation.
     };
 
+    // Result produced by the Input Sync + ElasticBuffer write stage for one cycle.
     struct InputSyncResult
     {
-        bool accepted;
-        int flit_type;
+        bool accepted; // True when the input handshake succeeded and the flit was written into an input VC.
+        int flit_type; // Type of the accepted flit; -1 means no flit was accepted this cycle.
 
         InputSyncResult()
         {
@@ -49,10 +52,11 @@ SC_MODULE(Router)
         }
     };
 
+    // Arbiter decision for one output port in one cycle.
     struct SwitchGrant
     {
-        int input_port;
-        int vc;
+        int input_port; // Input port selected to drive the requested output port; -1 means no grant.
+        int vc;         // Virtual channel selected from the granted input port.
 
         SwitchGrant()
         {
@@ -62,8 +66,8 @@ SC_MODULE(Router)
     };
 
     // Router ports.
-    sc_in<bool> rst;
-    sc_in<bool> clk;
+    sc_in<bool> rst; // Active-low reset shared by all router pipeline stages.
+    sc_in<bool> clk; // Clock used by all sequential router stages.
 
     sc_out<sc_lv<34>> out_flit[PORT_NUM]; // Output flit data driven to the next router or local core.
     sc_out<bool> out_req[PORT_NUM];       // Output valid signal; 1 when out_flit carries a valid flit.
@@ -74,21 +78,21 @@ SC_MODULE(Router)
     sc_out<bool> out_ack[PORT_NUM];     // Output ready signal; 1 when this router can accept a flit.
 
     // ElasticBuffer: input-side virtual-channel FIFOs.
-    std::queue<sc_lv<34>> in_q[PORT_NUM][VC_NUM];
+    std::queue<sc_lv<34>> in_q[PORT_NUM][VC_NUM]; // Buffered flits for each input port and virtual channel.
 
     // Output Sync: switch-to-link FIFOs and held flits for valid-ready output.
-    std::queue<sc_lv<34>> out_q[PORT_NUM];
-    bool tx_active[PORT_NUM];
-    sc_lv<34> tx_buffer[PORT_NUM];
+    std::queue<sc_lv<34>> out_q[PORT_NUM]; // Per-output FIFO after crossbar transfer, before link handshake.
+    bool tx_active[PORT_NUM];              // True when an output port is currently holding a flit until ack.
+    sc_lv<34> tx_buffer[PORT_NUM];         // Stable output flit register used while waiting for downstream ack.
 
     // Stall Control + Arbiter: allocation state for packet-level output locking.
-    int vc_state[PORT_NUM][VC_NUM];
-    int out_port_lock[PORT_NUM];
-    int output_rr_start[PORT_NUM];
+    int vc_state[PORT_NUM][VC_NUM]; // Allocated output port for each input VC; -1 means unallocated.
+    int out_port_lock[PORT_NUM];    // Encoded input-port/VC pair that owns each output until packet tail.
+    int output_rr_start[PORT_NUM];  // Round-robin starting input port for each output arbiter.
 
     // Input Sync state: body/tail flits follow the VC chosen by the header.
-    int rx_current_vc[PORT_NUM];
-    int router_id;
+    int rx_current_vc[PORT_NUM]; // Current packet VC for each input port; -1 means waiting for a header.
+    int router_id;               // Router coordinate ID in the 4x4 mesh, used by XY routing.
 
     void init(int id)
     {
