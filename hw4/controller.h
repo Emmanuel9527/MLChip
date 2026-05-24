@@ -1,8 +1,8 @@
 #ifndef CONTROLLER_H
 #define CONTROLLER_H
 
-#include "systemc.h"
 #include "pe.h"
+#include "systemc.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -20,48 +20,48 @@ SC_MODULE( Controller ) {
     sc_in  < bool >  rst;
     sc_in  < bool >  clk;
 
-    // ROM command interface.
-    // layer_id selects input image / conv layers / fc layers, layer_id_type
-    // selects weight or bias, and layer_id_valid is the one-cycle request pulse.
+    // ROM command interface. The ROM itself is kept unchanged.
     sc_out < int >   layer_id;
     sc_out < bool >  layer_id_type;
     sc_out < bool >  layer_id_valid;
 
-    // ROM streaming data interface. The ROM file keeps float data ports, so the
-    // controller reads float values and promotes them to double for computation.
+    // ROM streaming data interface.
     sc_in  < float > data;
     sc_in  < bool >  data_valid;
 
-    // Router / NoC local transmit interface required by the HW4 hardware setup.
-    // This implementation keeps the ports connected and initialized even though
-    // the AlexNet computation is scheduled inside this controller thread.
+    // Local NoC interface. The controller is connected to router 0 as the
+    // master node; PE workers are connected to routers 1 through 15.
     sc_out < sc_lv<34> > flit_tx;
     sc_out < bool > req_tx;
     sc_in  < bool > ack_tx;
 
-    // Router / NoC local receive interface required by the HW4 hardware setup.
-    // ack_rx is held ready so the connected router endpoint has a legal handshake.
     sc_in  < sc_lv<34> > flit_rx;
     sc_in  < bool > req_rx;
     sc_out < bool > ack_rx;
 
-    // Input image and zero-padding dimensions used by AlexNet conv1.
     static const int IMG_H = 224;
     static const int IMG_W = 224;
     static const int IMG_C = 3;
 
+    // AlexNet conv1 uses a 227x227 zero-padded image.
     static const int ZP_H = 227;
     static const int ZP_W = 227;
 
-    // Channel-major tensor index helper: [channel][height][width].
-    // This matches the data layout used in hw1 for image, feature maps, and weights.
+    // Router/core id 0 is reserved for the Controller. Worker PEs use ids 1..15.
+    static const int FIRST_WORKER = 1;
+    static const int LAST_WORKER = 15;
+    static const int WORKER_COUNT = 15;
+
+    // Monotonic id used to label jobs sent to PEs.
+    int next_job_id;
+
+    // Channel-major tensor addressing helper: tensor[c][h][w].
     static int idx3(int c, int h, int w, int height, int width)
     {
         return c * height * width + h * width + w;
     }
 
-    // Send one ROM request. The valid signal is asserted for exactly one clock
-    // cycle, matching the ROM protocol provided by the HW4 template.
+    // Assert the ROM request interface for one cycle.
     void request_rom(int id, bool type)
     {
         layer_id.write(id);
@@ -71,12 +71,11 @@ SC_MODULE( Controller ) {
         layer_id_valid.write(false);
     }
 
-    // Read one complete vector from ROM after issuing a layer request.
-    // The controller waits for data_valid to rise, collects values while it is
-    // high, and checks that the file length matches the expected layer size.
-    vector<double> read_rom_vector(int id, bool type, int expected)
+    // Read one complete tensor/vector from ROM.
+    // The ROM streams values while data_valid is high.
+    vector<float> read_rom_vector(int id, bool type, int expected)
     {
-        vector<double> values;
+        vector<float> values;
         values.reserve(expected);
         request_rom(id, type);
 
@@ -87,7 +86,7 @@ SC_MODULE( Controller ) {
             if (data_valid.read())
             {
                 started = true;
-                values.push_back((double)data.read());
+                values.push_back(data.read());
             }
             else if (started)
             {
@@ -104,11 +103,99 @@ SC_MODULE( Controller ) {
         return values;
     }
 
-    // Initial AlexNet zero padding. The 224x224 image is placed inside a
-    // 227x227 tensor using the same offset as hw1 ZeroPadding.
-    vector<double> zero_pad_224_to_227(const vector<double> &input)
+    // Send one flit into router[0] using valid-ready handshake.
+    void send_flit(const sc_lv<34> &flit)
     {
-        vector<double> output(ZP_H * ZP_W * IMG_C, 0.0);
+        while (true)
+        {
+            flit_tx.write(flit);
+            req_tx.write(true);
+            wait();
+
+            if (ack_tx.read())
+            {
+                req_tx.write(false);
+                return;
+            }
+        }
+    }
+
+    // Serialize a packet into one HEAD flit and payload BODY/TAIL flits.
+    void send_packet(const Packet &packet)
+    {
+        // HEAD flit layout: type=2, destination id, source id.
+        sc_lv<34> header;
+        header.range(33, 32) = 2;
+        header.range(31, 16) = packet.dest_id;
+        header.range(15, 0) = packet.source_id;
+        send_flit(header);
+
+        for (size_t i = 0; i < packet.datas.size(); i++)
+        {
+            // Payload flit layout: type in [33:32], raw float bits in [31:0].
+            sc_lv<34> flit;
+            flit.range(33, 32) = (i == packet.datas.size() - 1) ? 1 : 0;
+
+            union {
+                float fval;
+                unsigned int ival;
+            } converter;
+
+            converter.fval = packet.datas[i];
+            flit.range(31, 0) = converter.ival;
+            send_flit(flit);
+        }
+    }
+
+    // Block until one complete packet returns from a worker PE.
+    Packet receive_packet()
+    {
+        Packet packet;
+        bool active = false;
+
+        while (true)
+        {
+            ack_rx.write(true);
+            wait();
+
+            if (!req_rx.read())
+                continue;
+
+            sc_lv<34> flit = flit_rx.read();
+            int type = flit.range(33, 32).to_uint();
+
+            if (type == 2)
+            {
+                // HEAD starts a new return packet.
+                packet = Packet();
+                packet.dest_id = flit.range(31, 16).to_uint();
+                packet.source_id = flit.range(15, 0).to_uint();
+                active = true;
+            }
+            else if (active && (type == 0 || type == 1))
+            {
+                // BODY/TAIL payloads are reconstructed from raw float bits.
+                union {
+                    float fval;
+                    unsigned int ival;
+                } converter;
+
+                converter.ival = flit.range(31, 0).to_uint();
+                packet.datas.push_back(converter.fval);
+
+                if (type == 1)
+                {
+                    ack_rx.write(false);
+                    return packet;
+                }
+            }
+        }
+    }
+
+    // Initial image padding before conv1.
+    vector<float> zero_pad_224_to_227(const vector<float> &input)
+    {
+        vector<float> output(ZP_H * ZP_W * IMG_C, 0.0f);
         for (int c = 0; c < IMG_C; c++)
             for (int h = 0; h < IMG_H; h++)
                 for (int w = 0; w < IMG_W; w++)
@@ -117,13 +204,12 @@ SC_MODULE( Controller ) {
         return output;
     }
 
-    // Generic symmetric zero-padding used before conv2 to conv5.
-    // This mirrors the hw1 PaddingLayer behavior for intermediate feature maps.
-    vector<double> pad_layer(const vector<double> &input, int in_h, int in_w, int ch, int pad)
+    // Generic symmetric padding used before conv2..conv5.
+    vector<float> pad_layer(const vector<float> &input, int in_h, int in_w, int ch, int pad)
     {
         int out_h = in_h + 2 * pad;
         int out_w = in_w + 2 * pad;
-        vector<double> output(out_h * out_w * ch, 0.0);
+        vector<float> output(out_h * out_w * ch, 0.0f);
 
         for (int c = 0; c < ch; c++)
             for (int h = 0; h < in_h; h++)
@@ -133,111 +219,254 @@ SC_MODULE( Controller ) {
         return output;
     }
 
-    // Convolution datapath model.
-    // For each output channel and output pixel, it accumulates bias plus
-    // input * weight over all input channels and kernel positions.
-    vector<double> conv_layer(const vector<double> &input,
-                              const vector<double> &weight,
-                              const vector<double> &bias,
-                              int in_h, int in_w, int in_ch,
-                              int out_ch, int kernel, int stride)
+    // Extract the weight rows needed by one PE's output-channel slice.
+    vector<float> slice_conv_weight(const vector<float> &weight,
+                                    int oc_start, int oc_count,
+                                    int in_ch, int kernel)
     {
-        int out_h = (in_h - kernel) / stride + 1;
-        int out_w = (in_w - kernel) / stride + 1;
-        vector<double> output(out_h * out_w * out_ch, 0.0);
-
-        for (int oc = 0; oc < out_ch; oc++)
-        {
-            int out_base = oc * out_h * out_w;
-            int wt_oc_base = oc * in_ch * kernel * kernel;
-            for (int oh = 0; oh < out_h; oh++)
-            {
-                for (int ow = 0; ow < out_w; ow++)
-                {
-                    double sum = bias[oc];
-                    for (int ic = 0; ic < in_ch; ic++)
-                    {
-                        int in_base = ic * in_h * in_w;
-                        int wt_ic_base = wt_oc_base + ic * kernel * kernel;
-                        int ih_base = oh * stride;
-                        int iw_base = ow * stride;
-                        for (int kh = 0; kh < kernel; kh++)
-                        {
-                            int in_row = in_base + (ih_base + kh) * in_w;
-                            int wt_row = wt_ic_base + kh * kernel;
-                            for (int kw = 0; kw < kernel; kw++)
-                                sum += input[in_row + iw_base + kw] * weight[wt_row + kw];
-                        }
-                    }
-                    output[out_base + oh * out_w + ow] = sum;
-                }
-            }
-        }
-        return output;
+        int per_oc = in_ch * kernel * kernel;
+        vector<float> part(oc_count * per_oc);
+        for (int oc = 0; oc < oc_count; oc++)
+            for (int i = 0; i < per_oc; i++)
+                part[oc * per_oc + i] = weight[(oc_start + oc) * per_oc + i];
+        return part;
     }
 
-    // ReLU activation used after conv1 to conv5 and fc6 to fc7.
-    void relu_inplace(vector<double> &values)
+    // Extract the FC matrix rows needed by one PE's output-neuron slice.
+    vector<float> slice_fc_weight(const vector<float> &weight,
+                                  int o_start, int o_count,
+                                  int in_size)
     {
-        for (size_t i = 0; i < values.size(); i++)
-            if (values[i] < 0.0)
-                values[i] = 0.0;
-    }
-
-    // Max-pooling datapath model for pool1, pool2, and pool5.
-    // The shape parameters follow the AlexNet layer configuration.
-    vector<double> max_pool(const vector<double> &input, int in_h, int in_w, int ch, int kernel, int stride)
-    {
-        int out_h = (in_h - kernel) / stride + 1;
-        int out_w = (in_w - kernel) / stride + 1;
-        vector<double> output(out_h * out_w * ch, 0.0);
-
-        for (int c = 0; c < ch; c++)
-            for (int oh = 0; oh < out_h; oh++)
-                for (int ow = 0; ow < out_w; ow++)
-                {
-                    int start_h = oh * stride;
-                    int start_w = ow * stride;
-                    double best = input[idx3(c, start_h, start_w, in_h, in_w)];
-                    for (int kh = 0; kh < kernel; kh++)
-                        for (int kw = 0; kw < kernel; kw++)
-                            best = max(best, input[idx3(c, start_h + kh, start_w + kw, in_h, in_w)]);
-                    output[idx3(c, oh, ow, out_h, out_w)] = best;
-                }
-        return output;
-    }
-
-    // Fully connected datapath model for fc6, fc7, and fc8.
-    // Weights are stored in row-major order by output neuron.
-    vector<double> fc_layer(const vector<double> &input,
-                            const vector<double> &weight,
-                            const vector<double> &bias,
-                            int out_size)
-    {
-        int in_size = (int)input.size();
-        vector<double> output(out_size, 0.0);
-
-        for (int o = 0; o < out_size; o++)
-        {
-            const double *w = &weight[o * in_size];
-            double sum = bias[o];
+        vector<float> part(o_count * in_size);
+        for (int o = 0; o < o_count; o++)
             for (int i = 0; i < in_size; i++)
-                sum += w[i] * input[i];
-            output[o] = sum;
+                part[o * in_size + i] = weight[(o_start + o) * in_size + i];
+        return part;
+    }
+
+    // Append a tensor/vector payload to a packet data vector.
+    void append_vector(vector<float> &dst, const vector<float> &src)
+    {
+        dst.insert(dst.end(), src.begin(), src.end());
+    }
+
+    // Build a convolution job packet for one worker PE.
+    // Controller sends full input feature map plus sliced weight/bias.
+    Packet make_conv_job(int dest, int job_id,
+                         const vector<float> &input,
+                         const vector<float> &weight,
+                         const vector<float> &bias,
+                         int in_h, int in_w, int in_ch,
+                         int out_ch, int kernel, int stride,
+                         int oc_start, int oc_count)
+    {
+        vector<float> weight_part = slice_conv_weight(weight, oc_start, oc_count, in_ch, kernel);
+        vector<float> bias_part(bias.begin() + oc_start, bias.begin() + oc_start + oc_count);
+
+        Packet packet;
+        packet.source_id = 0;
+        packet.dest_id = dest;
+        packet.datas.push_back((float)OP_CONV);
+        packet.datas.push_back((float)job_id);
+        packet.datas.push_back(1.0f);
+        packet.datas.push_back((float)in_h);
+        packet.datas.push_back((float)in_w);
+        packet.datas.push_back((float)in_ch);
+        packet.datas.push_back((float)out_ch);
+        packet.datas.push_back((float)kernel);
+        packet.datas.push_back((float)stride);
+        packet.datas.push_back((float)oc_start);
+        packet.datas.push_back((float)oc_count);
+        packet.datas.push_back((float)input.size());
+        packet.datas.push_back((float)weight_part.size());
+        packet.datas.push_back((float)bias_part.size());
+        append_vector(packet.datas, input);
+        append_vector(packet.datas, weight_part);
+        append_vector(packet.datas, bias_part);
+        return packet;
+    }
+
+    // Build a pooling job packet for one worker PE.
+    // Pooling is partitioned by channel range.
+    Packet make_pool_job(int dest, int job_id,
+                         const vector<float> &input,
+                         int in_h, int in_w, int ch,
+                         int kernel, int stride,
+                         int c_start, int c_count)
+    {
+        Packet packet;
+        packet.source_id = 0;
+        packet.dest_id = dest;
+        packet.datas.push_back((float)OP_POOL);
+        packet.datas.push_back((float)job_id);
+        packet.datas.push_back((float)in_h);
+        packet.datas.push_back((float)in_w);
+        packet.datas.push_back((float)ch);
+        packet.datas.push_back((float)kernel);
+        packet.datas.push_back((float)stride);
+        packet.datas.push_back((float)c_start);
+        packet.datas.push_back((float)c_count);
+        packet.datas.push_back((float)input.size());
+        append_vector(packet.datas, input);
+        return packet;
+    }
+
+    // Build an FC job packet for one worker PE.
+    // FC is partitioned by output-neuron range.
+    Packet make_fc_job(int dest, int job_id,
+                       const vector<float> &input,
+                       const vector<float> &weight,
+                       const vector<float> &bias,
+                       int out_size,
+                       int o_start, int o_count,
+                       bool apply_relu)
+    {
+        vector<float> weight_part = slice_fc_weight(weight, o_start, o_count, (int)input.size());
+        vector<float> bias_part(bias.begin() + o_start, bias.begin() + o_start + o_count);
+
+        Packet packet;
+        packet.source_id = 0;
+        packet.dest_id = dest;
+        packet.datas.push_back((float)OP_FC);
+        packet.datas.push_back((float)job_id);
+        packet.datas.push_back(apply_relu ? 1.0f : 0.0f);
+        packet.datas.push_back((float)input.size());
+        packet.datas.push_back((float)out_size);
+        packet.datas.push_back((float)o_start);
+        packet.datas.push_back((float)o_count);
+        packet.datas.push_back((float)input.size());
+        packet.datas.push_back((float)weight_part.size());
+        packet.datas.push_back((float)bias_part.size());
+        append_vector(packet.datas, input);
+        append_vector(packet.datas, weight_part);
+        append_vector(packet.datas, bias_part);
+        return packet;
+    }
+
+    // Merge a PE result packet that contains one contiguous channel slice.
+    void merge_channel_result(vector<float> &output, const Packet &result)
+    {
+        int p = 0;
+        int job_id = (int)result.datas[p++];
+        int start = (int)result.datas[p++];
+        int count = (int)result.datas[p++];
+        int out_h = (int)result.datas[p++];
+        int out_w = (int)result.datas[p++];
+
+        for (int local = 0; local < count; local++)
+            for (int i = 0; i < out_h * out_w; i++)
+                output[(start + local) * out_h * out_w + i] = result.datas[p++];
+
+        (void)job_id;
+    }
+
+    // Run one convolution layer through worker PEs.
+    // This version sends a job and waits for its result before issuing the next
+    // job, keeping the receive path simple and deterministic.
+    vector<float> run_conv_on_pes(vector<float> &feature,
+                                  int layer,
+                                  int in_h, int in_w, int in_ch,
+                                  int out_ch, int kernel, int stride)
+    {
+        int weight_count = out_ch * in_ch * kernel * kernel;
+        vector<float> weight = read_rom_vector(layer, false, weight_count);
+        vector<float> bias = read_rom_vector(layer, true, out_ch);
+        int out_h = (in_h - kernel) / stride + 1;
+        int out_w = (in_w - kernel) / stride + 1;
+        vector<float> output(out_h * out_w * out_ch, 0.0f);
+
+        int base = 0;
+        for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_ch; worker++)
+        {
+            int remaining_workers = LAST_WORKER - worker + 1;
+            int oc_count = (out_ch - base + remaining_workers - 1) / remaining_workers;
+            int job_id = next_job_id++;
+            Packet packet = make_conv_job(worker, job_id, feature, weight, bias,
+                                          in_h, in_w, in_ch, out_ch, kernel, stride,
+                                          base, oc_count);
+            send_packet(packet);
+            Packet result = receive_packet();
+            merge_channel_result(output, result);
+            base += oc_count;
         }
+
         return output;
     }
 
-    // Numerically stable softmax for the final 1000 class scores.
-    vector<double> softmax(const vector<double> &input)
+    // Run one max-pooling layer through worker PEs.
+    vector<float> run_pool_on_pes(const vector<float> &feature,
+                                  int in_h, int in_w, int ch,
+                                  int kernel, int stride)
+    {
+        int out_h = (in_h - kernel) / stride + 1;
+        int out_w = (in_w - kernel) / stride + 1;
+        vector<float> output(out_h * out_w * ch, 0.0f);
+
+        int base = 0;
+        for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < ch; worker++)
+        {
+            int remaining_workers = LAST_WORKER - worker + 1;
+            int c_count = (ch - base + remaining_workers - 1) / remaining_workers;
+            int job_id = next_job_id++;
+            Packet packet = make_pool_job(worker, job_id, feature, in_h, in_w, ch,
+                                          kernel, stride, base, c_count);
+            send_packet(packet);
+            Packet result = receive_packet();
+            merge_channel_result(output, result);
+            base += c_count;
+        }
+
+        return output;
+    }
+
+    // Run one fully connected layer through worker PEs.
+    vector<float> run_fc_on_pes(const vector<float> &feature,
+                                int layer, int out_size, bool apply_relu)
+    {
+        int in_size = (int)feature.size();
+        vector<float> weight = read_rom_vector(layer, false, out_size * in_size);
+        vector<float> bias = read_rom_vector(layer, true, out_size);
+        vector<float> output(out_size, 0.0f);
+
+        int base = 0;
+        for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_size; worker++)
+        {
+            int remaining_workers = LAST_WORKER - worker + 1;
+            int o_count = (out_size - base + remaining_workers - 1) / remaining_workers;
+            int job_id = next_job_id++;
+            Packet packet = make_fc_job(worker, job_id, feature, weight, bias,
+                                        out_size, base, o_count, apply_relu);
+            send_packet(packet);
+
+            Packet result = receive_packet();
+            int p = 0;
+            int job_id = (int)result.datas[p++];
+            int start = (int)result.datas[p++];
+            int count = (int)result.datas[p++];
+            p += 2;
+            for (int j = 0; j < count; j++)
+                output[start + j] = result.datas[p++];
+            (void)job_id;
+
+            base += o_count;
+        }
+
+        return output;
+    }
+
+    // Final softmax is kept in Controller because it is a small output-format
+    // step after all PE-computed fc8 scores have been collected.
+    vector<double> softmax(const vector<float> &input)
     {
         vector<double> output(input.size(), 0.0);
-        double max_val = *max_element(input.begin(), input.end());
-        double sum = 0.0;
+        double max_val = input[0];
+        for (size_t i = 1; i < input.size(); i++)
+            max_val = max(max_val, (double)input[i]);
 
+        double sum = 0.0;
         for (size_t i = 0; i < input.size(); i++)
         {
-            output[i] = exp(input[i] - max_val);
+            output[i] = exp((double)input[i] - max_val);
             sum += output[i];
         }
         for (size_t i = 0; i < output.size(); i++)
@@ -245,33 +474,7 @@ SC_MODULE( Controller ) {
         return output;
     }
 
-    // Convenience wrapper for a convolution layer:
-    // fetch weights and bias from ROM, run convolution, then apply ReLU.
-    void load_and_run_conv(vector<double> &feature,
-                           int layer,
-                           int in_h, int in_w, int in_ch,
-                           int out_ch, int kernel, int stride)
-    {
-        int weight_count = out_ch * in_ch * kernel * kernel;
-        vector<double> weight = read_rom_vector(layer, false, weight_count);
-        vector<double> bias = read_rom_vector(layer, true, out_ch);
-        feature = conv_layer(feature, weight, bias, in_h, in_w, in_ch, out_ch, kernel, stride);
-            relu_inplace(feature);
-    }
-
-    // Convenience wrapper for a fully connected layer:
-    // fetch weights and bias from ROM, run FC, and optionally apply ReLU.
-    void load_and_run_fc(vector<double> &feature, int layer, int out_size, bool apply_relu)
-    {
-        int weight_count = out_size * (int)feature.size();
-        vector<double> weight = read_rom_vector(layer, false, weight_count);
-        vector<double> bias = read_rom_vector(layer, true, out_size);
-        feature = fc_layer(feature, weight, bias, out_size);
-        if (apply_relu)
-            relu_inplace(feature);
-    }
-
-    // Load the ImageNet label table used when printing the top-100 result.
+    // Load ImageNet class names for output formatting.
     vector<string> read_class_names()
     {
         vector<string> names;
@@ -282,21 +485,20 @@ SC_MODULE( Controller ) {
         return names;
     }
 
-    // Sort helper for probabilities in descending order.
+    // Sort helper for descending probability.
     static bool prob_greater(const pair<double, int> &a, const pair<double, int> &b)
     {
         return a.first > b.first;
     }
 
-    // Print the final classification table in the same format as hw1 Pattern.
-    void print_top100(const vector<double> &linear, const vector<double> &prob)
+    // Print the final Top-100 table in the same format as the assignment output.
+    void print_top100(const vector<float> &linear, const vector<double> &prob)
     {
         vector<pair<double, int> > order;
         for (int i = 0; i < 1000; i++)
             order.push_back(make_pair(prob[i], i));
 
         sort(order.begin(), order.end(), prob_greater);
-
         vector<string> names = read_class_names();
 
         cout << "Top 100 classes:" << endl;
@@ -320,19 +522,17 @@ SC_MODULE( Controller ) {
         cout << "=================================================" << endl;
     }
 
-    // Main controller schedule.
-    // This thread follows the HW4 top-level hardware configuration: it resets
-    // the ROM request lines and router endpoint, waits for reset deassertion,
-    // streams each required tensor from ROM, and executes AlexNet in order.
+    // Main Controller schedule:
+    // read ROM tensors, partition each layer into PE jobs, collect results,
+    // and advance through the AlexNet layer order.
     void run()
     {
-        // Default output values keep the ROM and router interfaces in a known
-        // idle state before the actual AlexNet schedule starts.
+        next_job_id = 1;
         layer_id.write(0);
         layer_id_type.write(false);
         layer_id_valid.write(false);
         req_tx.write(false);
-        ack_rx.write(true);
+        ack_rx.write(false);
         flit_tx.write(0);
 
         wait();
@@ -340,44 +540,44 @@ SC_MODULE( Controller ) {
             wait();
         wait();
 
-        // Input image and conv1: ROM image -> zero padding -> conv1 -> ReLU -> pool1.
-        vector<double> feature = read_rom_vector(0, false, IMG_H * IMG_W * IMG_C);
+        // Input image -> zero padding.
+        vector<float> feature = read_rom_vector(0, false, IMG_H * IMG_W * IMG_C);
         feature = zero_pad_224_to_227(feature);
 
-        load_and_run_conv(feature, 1, 227, 227, 3, 64, 11, 4);
-        feature = max_pool(feature, 55, 55, 64, 3, 2);
+        // conv1 -> ReLU in PE -> pool1 in PE.
+        feature = run_conv_on_pes(feature, 1, 227, 227, 3, 64, 11, 4);
+        feature = run_pool_on_pes(feature, 55, 55, 64, 3, 2);
 
-        // conv2 block: padding -> conv2 -> ReLU -> pool2.
+        // conv2 block: padding in Controller, conv/ReLU/pool in PEs.
         feature = pad_layer(feature, 27, 27, 64, 2);
-        load_and_run_conv(feature, 2, 31, 31, 64, 192, 5, 1);
-        feature = max_pool(feature, 27, 27, 192, 3, 2);
+        feature = run_conv_on_pes(feature, 2, 31, 31, 64, 192, 5, 1);
+        feature = run_pool_on_pes(feature, 27, 27, 192, 3, 2);
 
-        // conv3 block: padding -> conv3 -> ReLU.
+        // conv3 block.
         feature = pad_layer(feature, 13, 13, 192, 1);
-        load_and_run_conv(feature, 3, 15, 15, 192, 384, 3, 1);
+        feature = run_conv_on_pes(feature, 3, 15, 15, 192, 384, 3, 1);
 
-        // conv4 block: padding -> conv4 -> ReLU.
+        // conv4 block.
         feature = pad_layer(feature, 13, 13, 384, 1);
-        load_and_run_conv(feature, 4, 15, 15, 384, 256, 3, 1);
+        feature = run_conv_on_pes(feature, 4, 15, 15, 384, 256, 3, 1);
 
-        // conv5 block: padding -> conv5 -> ReLU -> pool5.
+        // conv5 block and final convolutional pooling.
         feature = pad_layer(feature, 13, 13, 256, 1);
-        load_and_run_conv(feature, 5, 15, 15, 256, 256, 3, 1);
-        feature = max_pool(feature, 13, 13, 256, 3, 2);
+        feature = run_conv_on_pes(feature, 5, 15, 15, 256, 256, 3, 1);
+        feature = run_pool_on_pes(feature, 13, 13, 256, 3, 2);
 
-        // Fully connected classifier: fc6 -> ReLU -> fc7 -> ReLU -> fc8.
-        load_and_run_fc(feature, 6, 4096, true);
-        load_and_run_fc(feature, 7, 4096, true);
-        load_and_run_fc(feature, 8, 1000, false);
+        // Fully connected classifier.
+        feature = run_fc_on_pes(feature, 6, 4096, true);
+        feature = run_fc_on_pes(feature, 7, 4096, true);
+        feature = run_fc_on_pes(feature, 8, 1000, false);
 
-        // Convert fc8 scores to probabilities and print the required top-100 table.
-        vector<double> linear = feature;
-        vector<double> prob = softmax(linear);
-        print_top100(linear, prob);
+        // Output conversion and report.
+        vector<double> prob = softmax(feature);
+        print_top100(feature, prob);
         sc_stop();
     }
 
-    // Register the controller as one clocked SystemC thread.
+    // Register the Controller as one clocked SystemC thread.
     SC_CTOR( Controller )
     {
         SC_THREAD( run );
