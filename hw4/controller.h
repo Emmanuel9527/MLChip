@@ -15,29 +15,30 @@
 
 using namespace std;
 
-SC_MODULE( Controller ) {
+SC_MODULE(Controller)
+{
     // Global clock and reset from the HW4 top-level testbench.
-    sc_in  < bool >  rst;
-    sc_in  < bool >  clk;
+    sc_in<bool> rst;
+    sc_in<bool> clk;
 
     // ROM command interface. The ROM itself is kept unchanged.
-    sc_out < int >   layer_id;
-    sc_out < bool >  layer_id_type;
-    sc_out < bool >  layer_id_valid;
+    sc_out<int> layer_id;
+    sc_out<bool> layer_id_type;
+    sc_out<bool> layer_id_valid;
 
     // ROM streaming data interface.
-    sc_in  < float > data;
-    sc_in  < bool >  data_valid;
+    sc_in<float> data;
+    sc_in<bool> data_valid;
 
     // Local NoC interface. The controller is connected to router 0 as the
     // master node; PE workers are connected to routers 1 through 15.
-    sc_out < sc_lv<34> > flit_tx;
-    sc_out < bool > req_tx;
-    sc_in  < bool > ack_tx;
+    sc_out<sc_lv<34>> flit_tx;
+    sc_out<bool> req_tx;
+    sc_in<bool> ack_tx;
 
-    sc_in  < sc_lv<34> > flit_rx;
-    sc_in  < bool > req_rx;
-    sc_out < bool > ack_rx;
+    sc_in<sc_lv<34>> flit_rx;
+    sc_in<bool> req_rx;
+    sc_out<bool> ack_rx;
 
     static const int IMG_H = 224;
     static const int IMG_W = 224;
@@ -136,7 +137,8 @@ SC_MODULE( Controller ) {
             sc_lv<34> flit;
             flit.range(33, 32) = (i == packet.datas.size() - 1) ? 1 : 0;
 
-            union {
+            union
+            {
                 float fval;
                 unsigned int ival;
             } converter;
@@ -175,7 +177,8 @@ SC_MODULE( Controller ) {
             else if (active && (type == 0 || type == 1))
             {
                 // BODY/TAIL payloads are reconstructed from raw float bits.
-                union {
+                union
+                {
                     float fval;
                     unsigned int ival;
                 } converter;
@@ -245,7 +248,7 @@ SC_MODULE( Controller ) {
     }
 
     // Append a tensor/vector payload to a packet data vector.
-    void append_vector(vector<float> &dst, const vector<float> &src)
+    void append_vector(vector<float> & dst, const vector<float> &src)
     {
         dst.insert(dst.end(), src.begin(), src.end());
     }
@@ -344,7 +347,7 @@ SC_MODULE( Controller ) {
     }
 
     // Merge a PE result packet that contains one contiguous channel slice.
-    void merge_channel_result(vector<float> &output, const Packet &result)
+    void merge_channel_result(vector<float> & output, const Packet &result)
     {
         int p = 0;
         int job_id = (int)result.datas[p++];
@@ -363,7 +366,7 @@ SC_MODULE( Controller ) {
     // Run one convolution layer through worker PEs.
     // This version sends a job and waits for its result before issuing the next
     // job, keeping the receive path simple and deterministic.
-    vector<float> run_conv_on_pes(vector<float> &feature,
+    vector<float> run_conv_on_pes(vector<float> & feature,
                                   int layer,
                                   int in_h, int in_w, int in_ch,
                                   int out_ch, int kernel, int stride)
@@ -440,13 +443,13 @@ SC_MODULE( Controller ) {
 
             Packet result = receive_packet();
             int p = 0;
-            int job_id = (int)result.datas[p++];
+            int result_job_id = (int)result.datas[p++];
             int start = (int)result.datas[p++];
             int count = (int)result.datas[p++];
             p += 2;
             for (int j = 0; j < count; j++)
                 output[start + j] = result.datas[p++];
-            (void)job_id;
+            (void)result_job_id;
 
             base += o_count;
         }
@@ -494,7 +497,7 @@ SC_MODULE( Controller ) {
     // Print the final Top-100 table in the same format as the assignment output.
     void print_top100(const vector<float> &linear, const vector<double> &prob)
     {
-        vector<pair<double, int> > order;
+        vector<pair<double, int>> order;
         for (int i = 0; i < 1000; i++)
             order.push_back(make_pair(prob[i], i));
 
@@ -578,9 +581,9 @@ SC_MODULE( Controller ) {
     }
 
     // Register the Controller as one clocked SystemC thread.
-    SC_CTOR( Controller )
+    SC_CTOR(Controller)
     {
-        SC_THREAD( run );
+        SC_THREAD(run);
         sensitive << clk.pos();
     }
 };
