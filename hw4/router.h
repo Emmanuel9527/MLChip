@@ -40,4 +40,31 @@ SC_MODULE( Router ) {
     }
 };
 
+void Router::rx_process()
+{
+    for (int i = 0; i < 5; i++)
+        out_ack[i].write(!rst.read());
+}
+
+void Router::tx_process()
+{
+    sc_lv<34> zero_flit;
+    zero_flit = 0;
+
+    for (int i = 0; i < 5; i++)
+    {
+        out_flit[i].write(zero_flit);
+        out_req[i].write(false);
+    }
+
+    if (rst.read())
+        return;
+
+    if (in_req[LOCAL].read() && in_ack[LOCAL].read())
+    {
+        out_flit[LOCAL].write(in_flit[LOCAL].read());
+        out_req[LOCAL].write(true);
+    }
+}
+
 #endif
