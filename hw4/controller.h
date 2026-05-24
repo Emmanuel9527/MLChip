@@ -91,7 +91,7 @@ SC_MODULE( Controller ) {
         for (int c = 0; c < IMG_C; c++)
             for (int h = 0; h < IMG_H; h++)
                 for (int w = 0; w < IMG_W; w++)
-                    output[idx3(c, h + 1, w + 1, ZP_H, ZP_W)] =
+                    output[idx3(c, h + 2, w + 2, ZP_H, ZP_W)] =
                         input[idx3(c, h, w, IMG_H, IMG_W)];
         return output;
     }
