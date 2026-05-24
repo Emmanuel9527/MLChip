@@ -19,16 +19,25 @@ struct Packet {
     vector<float> datas;
 };
 
-// Operation codes used by the Controller to select a PE kernel.
+// Operation codes used by the Controller to select PE actions.
 enum PeOp {
-    OP_CONV = 1,
-    OP_POOL = 2,
-    OP_FC = 3
+    OP_LOAD_INPUT = 1,
+    OP_LOAD_WEIGHT = 2,
+    OP_LOAD_BIAS = 3,
+    OP_COMPUTE_CONV = 4,
+    OP_COMPUTE_POOL = 5,
+    OP_COMPUTE_FC = 6
 };
 
 SC_MODULE( PE ) {
     // PE id matches the local router/core id in the 4x4 mesh.
     int id;
+
+    // Local buffers model the storage inside each PE. The Controller preloads
+    // these buffers before sending a small compute command.
+    vector<float> input_buf;
+    vector<float> weight_buf;
+    vector<float> bias_buf;
 
     // Channel-major tensor addressing helper: tensor[c][h][w].
     static int idx3(int c, int h, int w, int height, int width)
@@ -42,20 +51,45 @@ SC_MODULE( PE ) {
         id = pe_id;
     }
 
-    // Dispatch a complete job packet to the requested compute kernel.
+    // Top-level PE packet dispatcher.
+    // LOAD packets update local buffers and do not generate a response.
+    // COMPUTE packets consume local buffers and return an output slice packet.
     Packet *process_packet(const Packet &job)
     {
         if (job.datas.empty())
             return NULL;
 
         int op = (int)job.datas[0];
-        if (op == OP_CONV)
+        if (op == OP_LOAD_INPUT)
+        {
+            load_buffer(input_buf, job);
+            return NULL;
+        }
+        if (op == OP_LOAD_WEIGHT)
+        {
+            load_buffer(weight_buf, job);
+            return NULL;
+        }
+        if (op == OP_LOAD_BIAS)
+        {
+            load_buffer(bias_buf, job);
+            return NULL;
+        }
+        if (op == OP_COMPUTE_CONV)
             return run_conv(job);
-        if (op == OP_POOL)
+        if (op == OP_COMPUTE_POOL)
             return run_pool(job);
-        if (op == OP_FC)
+        if (op == OP_COMPUTE_FC)
             return run_fc(job);
         return NULL;
+    }
+
+    // Generic load packet:
+    // [op, layer_id, payload_size, payload...]
+    void load_buffer(vector<float> &buffer, const Packet &job)
+    {
+        int payload_size = (int)job.datas[2];
+        buffer.assign(job.datas.begin() + 3, job.datas.begin() + 3 + payload_size);
     }
 
     // Create a result packet addressed back to the original sender.
@@ -68,10 +102,11 @@ SC_MODULE( PE ) {
         return result;
     }
 
-    // Convolution job:
+    // Convolution compute command:
     // [op, job_id, apply_relu, in_h, in_w, in_ch, out_ch, kernel, stride,
-    //  oc_start, oc_count, input_size, weight_size, bias_size,
-    //  input..., sliced_weight..., sliced_bias...]
+    //  oc_start, oc_count]
+    // input_buf contains the full input feature map; weight_buf/bias_buf contain
+    // only this PE's assigned output-channel slice.
     Packet *run_conv(const Packet &job)
     {
         const vector<float> &d = job.datas;
@@ -86,15 +121,6 @@ SC_MODULE( PE ) {
         int stride = (int)d[p++];
         int oc_start = (int)d[p++];
         int oc_count = (int)d[p++];
-        int input_size = (int)d[p++];
-        int weight_size = (int)d[p++];
-        int bias_size = (int)d[p++];
-
-        const float *input = &d[p];
-        p += input_size;
-        const float *weight = &d[p];
-        p += weight_size;
-        const float *bias = &d[p];
 
         int out_h = (in_h - kernel) / stride + 1;
         int out_w = (in_w - kernel) / stride + 1;
@@ -107,13 +133,12 @@ SC_MODULE( PE ) {
         // Each PE computes only its assigned output-channel range.
         for (int local_oc = 0; local_oc < oc_count; local_oc++)
         {
-            int oc = oc_start + local_oc;
             int wt_oc_base = local_oc * in_ch * kernel * kernel;
             for (int oh = 0; oh < out_h; oh++)
             {
                 for (int ow = 0; ow < out_w; ow++)
                 {
-                    double sum = bias[local_oc];
+                    double sum = bias_buf[local_oc];
                     for (int ic = 0; ic < in_ch; ic++)
                     {
                         int in_base = ic * in_h * in_w;
@@ -125,7 +150,7 @@ SC_MODULE( PE ) {
                             int in_row = in_base + (ih_base + kh) * in_w;
                             int wt_row = wt_ic_base + kh * kernel;
                             for (int kw = 0; kw < kernel; kw++)
-                                sum += input[in_row + iw_base + kw] * weight[wt_row + kw];
+                                sum += input_buf[in_row + iw_base + kw] * weight_buf[wt_row + kw];
                         }
                     }
                     if (apply_relu && sum < 0.0)
@@ -136,13 +161,12 @@ SC_MODULE( PE ) {
         }
 
         (void)out_ch;
-        (void)bias_size;
         return result;
     }
 
-    // Max-pooling job:
-    // [op, job_id, in_h, in_w, ch, kernel, stride,
-    //  c_start, c_count, input_size, input...]
+    // Max-pooling compute command:
+    // [op, job_id, in_h, in_w, ch, kernel, stride, c_start, c_count]
+    // input_buf contains the full input feature map.
     Packet *run_pool(const Packet &job)
     {
         const vector<float> &d = job.datas;
@@ -155,8 +179,6 @@ SC_MODULE( PE ) {
         int stride = (int)d[p++];
         int c_start = (int)d[p++];
         int c_count = (int)d[p++];
-        int input_size = (int)d[p++];
-        const float *input = &d[p];
 
         int out_h = (in_h - kernel) / stride + 1;
         int out_w = (in_w - kernel) / stride + 1;
@@ -177,23 +199,23 @@ SC_MODULE( PE ) {
                 {
                     int start_h = oh * stride;
                     int start_w = ow * stride;
-                    float best = input[idx3(c, start_h, start_w, in_h, in_w)];
+                    float best = input_buf[idx3(c, start_h, start_w, in_h, in_w)];
                     for (int kh = 0; kh < kernel; kh++)
                         for (int kw = 0; kw < kernel; kw++)
-                            best = max(best, input[idx3(c, start_h + kh, start_w + kw, in_h, in_w)]);
+                            best = max(best, input_buf[idx3(c, start_h + kh, start_w + kw, in_h, in_w)]);
                     result->datas.push_back(best);
                 }
             }
         }
 
         (void)ch;
-        (void)input_size;
         return result;
     }
 
-    // Fully connected job:
-    // [op, job_id, apply_relu, in_size, out_size, o_start, o_count,
-    //  input_size, weight_size, bias_size, input..., sliced_weight..., sliced_bias...]
+    // Fully connected compute command:
+    // [op, job_id, apply_relu, in_size, out_size, o_start, o_count]
+    // input_buf contains the full input vector; weight_buf/bias_buf contain only
+    // this PE's assigned output-neuron rows.
     Packet *run_fc(const Packet &job)
     {
         const vector<float> &d = job.datas;
@@ -204,15 +226,6 @@ SC_MODULE( PE ) {
         int out_size = (int)d[p++];
         int o_start = (int)d[p++];
         int o_count = (int)d[p++];
-        int input_size = (int)d[p++];
-        int weight_size = (int)d[p++];
-        int bias_size = (int)d[p++];
-
-        const float *input = &d[p];
-        p += input_size;
-        const float *weight = &d[p];
-        p += weight_size;
-        const float *bias = &d[p];
 
         Packet *result = make_result(job, job_id);
         result->datas.push_back((float)o_start);
@@ -223,17 +236,15 @@ SC_MODULE( PE ) {
         // FC is partitioned by output neuron rows.
         for (int local_o = 0; local_o < o_count; local_o++)
         {
-            const float *w = &weight[local_o * in_size];
-            double sum = bias[local_o];
+            const float *w = &weight_buf[local_o * in_size];
+            double sum = bias_buf[local_o];
             for (int i = 0; i < in_size; i++)
-                sum += w[i] * input[i];
+                sum += w[i] * input_buf[i];
             if (apply_relu && sum < 0.0)
                 sum = 0.0;
             result->datas.push_back((float)sum);
         }
 
-        (void)weight_size;
-        (void)bias_size;
         return result;
     }
 

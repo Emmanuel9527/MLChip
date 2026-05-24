@@ -13,32 +13,76 @@
 using namespace std;
 
 SC_MODULE( Router ) {
+    /*
+    HW4 NoC router model.
+
+    The link protocol is VALID/READY style:
+      in_req/out_req  = VALID
+      out_ack/in_ack  = READY
+      flit transfer   = VALID && READY
+
+    VALID is generated from buffered data and is held until READY arrives. This
+    follows the AXI-style rule that VALID must not wait for READY before rising.
+
+    Internal pipeline:
+      Input Sync -> Virtual-Channel Buffer -> XY Routing
+                 -> Round-Robin Switch Allocation -> Output Queue -> Output Sync
+    */
+
+    static const int PORT_NUM = 5;
+    static const int VC_NUM = 2;
+    static const int VC_DEPTH = 16;
+    static const int OUT_DEPTH = 8;
+
+    enum FlitType {
+        BODY_FLIT = 0,
+        TAIL_FLIT = 1,
+        HEAD_FLIT = 2
+    };
+
+    struct InputResult {
+        bool accepted;
+        int flit_type;
+
+        InputResult() : accepted(false), flit_type(-1) {}
+    };
+
+    struct Grant {
+        int input_port;
+        int vc;
+
+        Grant() : input_port(-1), vc(-1) {}
+    };
+
     // Five-port router: NORTH, SOUTH, EAST, WEST, and LOCAL.
     sc_in  < bool >  rst;
     sc_in  < bool >  clk;
 
     // Output-side valid-ready links.
-    sc_out < sc_lv<34> > out_flit[5];
-    sc_out < bool > out_req[5];
-    sc_in  < bool > in_ack[5];
+    sc_out < sc_lv<34> > out_flit[PORT_NUM];
+    sc_out < bool > out_req[PORT_NUM];
+    sc_in  < bool > in_ack[PORT_NUM];
 
     // Input-side valid-ready links.
-    sc_in  < sc_lv<34> > in_flit[5];
-    sc_in  < bool > in_req[5];
-    sc_out < bool > out_ack[5];
+    sc_in  < sc_lv<34> > in_flit[PORT_NUM];
+    sc_in  < bool > in_req[PORT_NUM];
+    sc_out < bool > out_ack[PORT_NUM];
 
-    // Router id is the node id in the 4x4 mesh.
     int router_id;
 
-    // Per-input packet state. A HEAD flit computes the route, and BODY/TAIL
-    // flits reuse that route until the packet finishes.
-    int current_route[5];
-    bool packet_active[5];
+    // Input virtual-channel buffers.
+    queue<sc_lv<34> > in_q[PORT_NUM][VC_NUM];
 
-    // Per-output buffering and handshake state.
-    bool tx_active[5];
-    sc_lv<34> tx_buffer[5];
-    queue<sc_lv<34> > out_q[5];
+    // Output queues and output-sync holding registers.
+    queue<sc_lv<34> > out_q[PORT_NUM];
+    bool tx_active[PORT_NUM];
+    sc_lv<34> tx_buffer[PORT_NUM];
+
+    // Packet-level allocation state.
+    int vc_state[PORT_NUM][VC_NUM];
+    int out_port_lock[PORT_NUM];
+    int output_rr_start[PORT_NUM];
+    int rx_current_vc[PORT_NUM];
 
     // main.cpp assigns this router's mesh node id after construction.
     void init(int id)
@@ -59,7 +103,6 @@ SC_MODULE( Router ) {
     }
 
     // Deterministic XY routing for a 4x4 mesh.
-    // Move in X first; once x matches, move in Y; LOCAL means destination hit.
     int routing_computation(int current_id, int dest_id)
     {
         int cx = current_id % 4;
@@ -78,127 +121,356 @@ SC_MODULE( Router ) {
         return LOCAL;
     }
 
-    // Utility used by reset to drop any buffered flits.
     void clear_queue(queue<sc_lv<34> > &q)
     {
         while (!q.empty())
             q.pop();
     }
 
-    // Reset internal routing state and drive all links idle.
-    void reset_state()
+    bool eb_has_space(int port, int vc)
     {
-        sc_lv<34> zero_flit;
-        zero_flit = 0;
-        for (int i = 0; i < 5; i++)
+        return (int)in_q[port][vc].size() < VC_DEPTH;
+    }
+
+    bool any_vc_has_space(int port)
+    {
+        for (int vc = 0; vc < VC_NUM; vc++)
+            if (eb_has_space(port, vc))
+                return true;
+        return false;
+    }
+
+    bool output_has_space(int port)
+    {
+        return (int)out_q[port].size() < OUT_DEPTH;
+    }
+
+    /*
+    VC mapping:
+      VC0 is preferred for Controller -> PE request/load/compute packets.
+      VC1 is preferred for PE -> Controller response packets.
+
+    This mirrors the lecture idea of separating request and response traffic so
+    result packets do not occupy the same virtual channel as command/data flows.
+    */
+    int preferred_vc_for_header(const sc_lv<34> &flit)
+    {
+        int dest = flit_dest_id(flit);
+        return (dest == 0) ? 1 : 0;
+    }
+
+    int choose_input_vc(int input_port, const sc_lv<34> &flit)
+    {
+        int preferred = preferred_vc_for_header(flit);
+        int other = 1 - preferred;
+
+        if (eb_has_space(input_port, preferred))
+            return preferred;
+        if (eb_has_space(input_port, other))
+            return other;
+        return -1;
+    }
+
+    int encode_lock(int input_port, int vc)
+    {
+        return input_port * VC_NUM + vc;
+    }
+
+    // READY generation for one input port. READY depends on buffer capacity,
+    // not on the sender's VALID policy.
+    bool ready_for_input(int input_port)
+    {
+        if (!in_req[input_port].read())
+            return any_vc_has_space(input_port);
+
+        sc_lv<34> incoming = in_flit[input_port].read();
+        int type = flit_type(incoming);
+
+        if (type == HEAD_FLIT)
+            return choose_input_vc(input_port, incoming) != -1;
+
+        if (rx_current_vc[input_port] != -1)
+            return eb_has_space(input_port, rx_current_vc[input_port]);
+
+        return false;
+    }
+
+    // Input Sync + VC buffer write.
+    InputResult accept_one_input(int input_port)
+    {
+        InputResult result;
+
+        if (!in_req[input_port].read() || !out_ack[input_port].read())
+            return result;
+
+        sc_lv<34> incoming = in_flit[input_port].read();
+        int type = flit_type(incoming);
+        int vc = rx_current_vc[input_port];
+
+        if (type == HEAD_FLIT)
+            vc = choose_input_vc(input_port, incoming);
+
+        if (vc == -1 || !eb_has_space(input_port, vc))
+            return result;
+
+        if (type == HEAD_FLIT)
+            rx_current_vc[input_port] = vc;
+
+        in_q[input_port][vc].push(incoming);
+        result.accepted = true;
+        result.flit_type = type;
+
+        if (type == TAIL_FLIT)
+            rx_current_vc[input_port] = -1;
+
+        return result;
+    }
+
+    void input_port_stage(int input_port)
+    {
+        while (true)
         {
-            current_route[i] = LOCAL;
-            packet_active[i] = false;
-            tx_active[i] = false;
-            tx_buffer[i] = zero_flit;
-            clear_queue(out_q[i]);
-            out_flit[i].write(zero_flit);
-            out_req[i].write(false);
-            out_ack[i].write(false);
+            if (rst.read())
+            {
+                rx_current_vc[input_port] = -1;
+                out_ack[input_port].write(false);
+                wait();
+                continue;
+            }
+
+            accept_one_input(input_port);
+            out_ack[input_port].write(ready_for_input(input_port));
+            wait();
         }
     }
 
-    // Input stage. Accept valid flits when the selected output queue has space.
-    // HEAD decides the output port; BODY/TAIL follow current_route[p].
-    void accept_inputs()
+    bool can_allocate_output(int out, int input_port, int vc)
     {
-        for (int p = 0; p < 5; p++)
+        if (out_port_lock[out] == -1)
         {
-            bool can_accept = out_q[current_route[p]].size() < 32;
-            out_ack[p].write(can_accept);
+            out_port_lock[out] = encode_lock(input_port, vc);
+            vc_state[input_port][vc] = out;
+            return true;
+        }
 
-            if (!can_accept || !in_req[p].read())
+        return false;
+    }
+
+    // One round-robin arbiter per output port.
+    Grant arbitrate_output(int out, bool input_used[PORT_NUM])
+    {
+        Grant grant;
+
+        if (!output_has_space(out))
+            return grant;
+
+        for (int step = 0; step < PORT_NUM; step++)
+        {
+            int input_port = (output_rr_start[out] + step) % PORT_NUM;
+            if (input_used[input_port])
                 continue;
 
-            sc_lv<34> flit = in_flit[p].read();
-            int type = flit_type(flit);
-
-            if (type == 2)
+            for (int vc = 0; vc < VC_NUM; vc++)
             {
-                current_route[p] = routing_computation(router_id, flit_dest_id(flit));
-                packet_active[p] = true;
+                if (in_q[input_port][vc].empty())
+                    continue;
+
+                sc_lv<34> candidate = in_q[input_port][vc].front();
+                int type = flit_type(candidate);
+
+                if (vc_state[input_port][vc] == -1)
+                {
+                    if (type != HEAD_FLIT)
+                    {
+                        in_q[input_port][vc].pop();
+                        continue;
+                    }
+
+                    int target_out = routing_computation(router_id, flit_dest_id(candidate));
+                    if (target_out != out)
+                        continue;
+
+                    if (!can_allocate_output(out, input_port, vc))
+                        continue;
+                }
+
+                if (vc_state[input_port][vc] == out &&
+                    out_port_lock[out] == encode_lock(input_port, vc))
+                {
+                    grant.input_port = input_port;
+                    grant.vc = vc;
+                    return grant;
+                }
             }
+        }
 
-            int out = packet_active[p] ? current_route[p] : routing_computation(router_id, flit_dest_id(flit));
-            out_q[out].push(flit);
+        return grant;
+    }
 
-            if (type == 1)
+    // Crossbar movement from granted input VC to output queue.
+    void transfer_grant(int out, const Grant &grant, bool input_used[PORT_NUM])
+    {
+        if (grant.input_port == -1)
+            return;
+
+        sc_lv<34> flit = in_q[grant.input_port][grant.vc].front();
+        int type = flit_type(flit);
+
+        out_q[out].push(flit);
+        in_q[grant.input_port][grant.vc].pop();
+        input_used[grant.input_port] = true;
+        output_rr_start[out] = (grant.input_port + 1) % PORT_NUM;
+
+        if (type == TAIL_FLIT)
+        {
+            out_port_lock[out] = -1;
+            vc_state[grant.input_port][grant.vc] = -1;
+        }
+    }
+
+    void reset_allocation_state()
+    {
+        for (int p = 0; p < PORT_NUM; p++)
+        {
+            out_port_lock[p] = -1;
+            output_rr_start[p] = 0;
+            clear_queue(out_q[p]);
+
+            for (int vc = 0; vc < VC_NUM; vc++)
             {
-                packet_active[p] = false;
-                current_route[p] = LOCAL;
+                vc_state[p][vc] = -1;
+                clear_queue(in_q[p][vc]);
             }
         }
     }
 
-    // Output stage. Hold one flit stable until the downstream receiver acks it.
-    void drive_outputs()
+    void route_arbiter_crossbar_stage()
     {
-        for (int p = 0; p < 5; p++)
+        while (true)
         {
-            if (tx_active[p] && in_ack[p].read())
+            if (rst.read())
             {
-                if (!out_q[p].empty())
-                    out_q[p].pop();
-                tx_active[p] = false;
+                reset_allocation_state();
+                wait();
+                continue;
             }
 
-            if (!tx_active[p] && !out_q[p].empty())
+            bool input_used[PORT_NUM];
+            for (int p = 0; p < PORT_NUM; p++)
+                input_used[p] = false;
+
+            for (int out = 0; out < PORT_NUM; out++)
             {
-                tx_buffer[p] = out_q[p].front();
-                tx_active[p] = true;
+                Grant grant = arbitrate_output(out, input_used);
+                transfer_grant(out, grant, input_used);
             }
 
-            if (tx_active[p])
-            {
-                out_flit[p].write(tx_buffer[p]);
-                out_req[p].write(true);
-            }
-            else
+            wait();
+        }
+    }
+
+    // Output Sync: keep VALID high and flit stable until downstream READY.
+    void output_stage(int output_port)
+    {
+        while (true)
+        {
+            if (rst.read())
             {
                 sc_lv<34> zero_flit;
                 zero_flit = 0;
-                out_flit[p].write(zero_flit);
-                out_req[p].write(false);
+                tx_active[output_port] = false;
+                tx_buffer[output_port] = zero_flit;
+                out_req[output_port].write(false);
+                out_flit[output_port].write(zero_flit);
+                wait();
+                continue;
             }
+
+            if (tx_active[output_port] && in_ack[output_port].read())
+            {
+                if (!out_q[output_port].empty())
+                    out_q[output_port].pop();
+                tx_active[output_port] = false;
+            }
+
+            if (!tx_active[output_port] && !out_q[output_port].empty())
+            {
+                tx_buffer[output_port] = out_q[output_port].front();
+                tx_active[output_port] = true;
+            }
+
+            if (tx_active[output_port])
+            {
+                out_flit[output_port].write(tx_buffer[output_port]);
+                out_req[output_port].write(true);
+            }
+            else
+            {
+                out_req[output_port].write(false);
+            }
+
+            wait();
         }
     }
 
-    // Single-cycle router pipeline model with active-high reset.
-    void tick()
-    {
-        if (rst.read())
-        {
-            reset_state();
-            return;
-        }
+    void input_thread_0() { input_port_stage(0); }
+    void input_thread_1() { input_port_stage(1); }
+    void input_thread_2() { input_port_stage(2); }
+    void input_thread_3() { input_port_stage(3); }
+    void input_thread_4() { input_port_stage(4); }
 
-        accept_inputs();
-        drive_outputs();
-    }
+    void route_thread() { route_arbiter_crossbar_stage(); }
 
-    // Initialize visible outputs and register the clocked tick method.
+    void output_thread_0() { output_stage(0); }
+    void output_thread_1() { output_stage(1); }
+    void output_thread_2() { output_stage(2); }
+    void output_thread_3() { output_stage(3); }
+    void output_thread_4() { output_stage(4); }
+
     SC_CTOR( Router )
     {
         router_id = 0;
         sc_lv<34> zero_flit;
         zero_flit = 0;
-        for (int i = 0; i < 5; i++)
+
+        for (int p = 0; p < PORT_NUM; p++)
         {
-            current_route[i] = LOCAL;
-            packet_active[i] = false;
-            tx_active[i] = false;
-            tx_buffer[i] = zero_flit;
-            out_req[i].initialize(false);
-            out_ack[i].initialize(false);
-            out_flit[i].initialize(zero_flit);
+            out_port_lock[p] = -1;
+            output_rr_start[p] = 0;
+            rx_current_vc[p] = -1;
+            tx_active[p] = false;
+            tx_buffer[p] = zero_flit;
+            out_req[p].initialize(false);
+            out_ack[p].initialize(false);
+            out_flit[p].initialize(zero_flit);
+
+            for (int vc = 0; vc < VC_NUM; vc++)
+                vc_state[p][vc] = -1;
         }
 
-        SC_METHOD(tick);
+        SC_THREAD(input_thread_0);
+        sensitive << clk.pos();
+        SC_THREAD(input_thread_1);
+        sensitive << clk.pos();
+        SC_THREAD(input_thread_2);
+        sensitive << clk.pos();
+        SC_THREAD(input_thread_3);
+        sensitive << clk.pos();
+        SC_THREAD(input_thread_4);
+        sensitive << clk.pos();
+
+        SC_THREAD(route_thread);
+        sensitive << clk.pos();
+
+        SC_THREAD(output_thread_0);
+        sensitive << clk.pos();
+        SC_THREAD(output_thread_1);
+        sensitive << clk.pos();
+        SC_THREAD(output_thread_2);
+        sensitive << clk.pos();
+        SC_THREAD(output_thread_3);
+        sensitive << clk.pos();
+        SC_THREAD(output_thread_4);
         sensitive << clk.pos();
     }
 };

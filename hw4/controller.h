@@ -188,7 +188,6 @@ SC_MODULE(Controller)
 
                 if (type == 1)
                 {
-                    ack_rx.write(false);
                     return packet;
                 }
             }
@@ -253,23 +252,31 @@ SC_MODULE(Controller)
         dst.insert(dst.end(), src.begin(), src.end());
     }
 
-    // Build a convolution job packet for one worker PE.
-    // Controller sends full input feature map plus sliced weight/bias.
-    Packet make_conv_job(int dest, int job_id,
-                         const vector<float> &input,
-                         const vector<float> &weight,
-                         const vector<float> &bias,
-                         int in_h, int in_w, int in_ch,
-                         int out_ch, int kernel, int stride,
-                         int oc_start, int oc_count)
+    // Build a PE local-buffer load packet.
+    // Layout: [op, layer_id, payload_size, payload...]
+    Packet make_load_packet(int dest, int op, int layer, const vector<float> &payload)
     {
-        vector<float> weight_part = slice_conv_weight(weight, oc_start, oc_count, in_ch, kernel);
-        vector<float> bias_part(bias.begin() + oc_start, bias.begin() + oc_start + oc_count);
-
         Packet packet;
         packet.source_id = 0;
         packet.dest_id = dest;
-        packet.datas.push_back((float)OP_CONV);
+        packet.datas.push_back((float)op);
+        packet.datas.push_back((float)layer);
+        packet.datas.push_back((float)payload.size());
+        append_vector(packet.datas, payload);
+        return packet;
+    }
+
+    // Build a small convolution compute command.
+    // Input/weight/bias data are reused from PE local buffers.
+    Packet make_conv_compute(int dest, int job_id,
+                             int in_h, int in_w, int in_ch,
+                             int out_ch, int kernel, int stride,
+                             int oc_start, int oc_count)
+    {
+        Packet packet;
+        packet.source_id = 0;
+        packet.dest_id = dest;
+        packet.datas.push_back((float)OP_COMPUTE_CONV);
         packet.datas.push_back((float)job_id);
         packet.datas.push_back(1.0f);
         packet.datas.push_back((float)in_h);
@@ -280,27 +287,19 @@ SC_MODULE(Controller)
         packet.datas.push_back((float)stride);
         packet.datas.push_back((float)oc_start);
         packet.datas.push_back((float)oc_count);
-        packet.datas.push_back((float)input.size());
-        packet.datas.push_back((float)weight_part.size());
-        packet.datas.push_back((float)bias_part.size());
-        append_vector(packet.datas, input);
-        append_vector(packet.datas, weight_part);
-        append_vector(packet.datas, bias_part);
         return packet;
     }
 
-    // Build a pooling job packet for one worker PE.
-    // Pooling is partitioned by channel range.
-    Packet make_pool_job(int dest, int job_id,
-                         const vector<float> &input,
-                         int in_h, int in_w, int ch,
-                         int kernel, int stride,
-                         int c_start, int c_count)
+    // Build a small pooling compute command.
+    Packet make_pool_compute(int dest, int job_id,
+                             int in_h, int in_w, int ch,
+                             int kernel, int stride,
+                             int c_start, int c_count)
     {
         Packet packet;
         packet.source_id = 0;
         packet.dest_id = dest;
-        packet.datas.push_back((float)OP_POOL);
+        packet.datas.push_back((float)OP_COMPUTE_POOL);
         packet.datas.push_back((float)job_id);
         packet.datas.push_back((float)in_h);
         packet.datas.push_back((float)in_w);
@@ -309,40 +308,25 @@ SC_MODULE(Controller)
         packet.datas.push_back((float)stride);
         packet.datas.push_back((float)c_start);
         packet.datas.push_back((float)c_count);
-        packet.datas.push_back((float)input.size());
-        append_vector(packet.datas, input);
         return packet;
     }
 
-    // Build an FC job packet for one worker PE.
-    // FC is partitioned by output-neuron range.
-    Packet make_fc_job(int dest, int job_id,
-                       const vector<float> &input,
-                       const vector<float> &weight,
-                       const vector<float> &bias,
-                       int out_size,
-                       int o_start, int o_count,
-                       bool apply_relu)
+    // Build a small FC compute command.
+    Packet make_fc_compute(int dest, int job_id,
+                           int in_size, int out_size,
+                           int o_start, int o_count,
+                           bool apply_relu)
     {
-        vector<float> weight_part = slice_fc_weight(weight, o_start, o_count, (int)input.size());
-        vector<float> bias_part(bias.begin() + o_start, bias.begin() + o_start + o_count);
-
         Packet packet;
         packet.source_id = 0;
         packet.dest_id = dest;
-        packet.datas.push_back((float)OP_FC);
+        packet.datas.push_back((float)OP_COMPUTE_FC);
         packet.datas.push_back((float)job_id);
         packet.datas.push_back(apply_relu ? 1.0f : 0.0f);
-        packet.datas.push_back((float)input.size());
+        packet.datas.push_back((float)in_size);
         packet.datas.push_back((float)out_size);
         packet.datas.push_back((float)o_start);
         packet.datas.push_back((float)o_count);
-        packet.datas.push_back((float)input.size());
-        packet.datas.push_back((float)weight_part.size());
-        packet.datas.push_back((float)bias_part.size());
-        append_vector(packet.datas, input);
-        append_vector(packet.datas, weight_part);
-        append_vector(packet.datas, bias_part);
         return packet;
     }
 
@@ -364,8 +348,8 @@ SC_MODULE(Controller)
     }
 
     // Run one convolution layer through worker PEs.
-    // This version sends a job and waits for its result before issuing the next
-    // job, keeping the receive path simple and deterministic.
+    // The Controller first preloads each PE's local input/weight/bias buffers,
+    // then dispatches all compute commands before collecting output slices.
     vector<float> run_conv_on_pes(vector<float> & feature,
                                   int layer,
                                   int in_h, int in_w, int in_ch,
@@ -378,25 +362,48 @@ SC_MODULE(Controller)
         int out_w = (in_w - kernel) / stride + 1;
         vector<float> output(out_h * out_w * out_ch, 0.0f);
 
+        vector<int> workers;
+        vector<int> starts;
+        vector<int> counts;
+
         int base = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_ch; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
             int oc_count = (out_ch - base + remaining_workers - 1) / remaining_workers;
+            vector<float> weight_part = slice_conv_weight(weight, base, oc_count, in_ch, kernel);
+            vector<float> bias_part(bias.begin() + base, bias.begin() + base + oc_count);
+
+            send_packet(make_load_packet(worker, OP_LOAD_INPUT, layer, feature));
+            send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
+            send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
+
+            workers.push_back(worker);
+            starts.push_back(base);
+            counts.push_back(oc_count);
+            base += oc_count;
+        }
+
+        for (size_t i = 0; i < workers.size(); i++)
+        {
             int job_id = next_job_id++;
-            Packet packet = make_conv_job(worker, job_id, feature, weight, bias,
-                                          in_h, in_w, in_ch, out_ch, kernel, stride,
-                                          base, oc_count);
+            Packet packet = make_conv_compute(workers[i], job_id,
+                                              in_h, in_w, in_ch, out_ch, kernel, stride,
+                                              starts[i], counts[i]);
             send_packet(packet);
+        }
+
+        for (size_t i = 0; i < workers.size(); i++)
+        {
             Packet result = receive_packet();
             merge_channel_result(output, result);
-            base += oc_count;
         }
 
         return output;
     }
 
     // Run one max-pooling layer through worker PEs.
+    // Pooling has no weight/bias, so only input is preloaded.
     vector<float> run_pool_on_pes(const vector<float> &feature,
                                   int in_h, int in_w, int ch,
                                   int kernel, int stride)
@@ -405,18 +412,35 @@ SC_MODULE(Controller)
         int out_w = (in_w - kernel) / stride + 1;
         vector<float> output(out_h * out_w * ch, 0.0f);
 
+        vector<int> workers;
+        vector<int> starts;
+        vector<int> counts;
+
         int base = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < ch; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
             int c_count = (ch - base + remaining_workers - 1) / remaining_workers;
+            send_packet(make_load_packet(worker, OP_LOAD_INPUT, 0, feature));
+
+            workers.push_back(worker);
+            starts.push_back(base);
+            counts.push_back(c_count);
+            base += c_count;
+        }
+
+        for (size_t i = 0; i < workers.size(); i++)
+        {
             int job_id = next_job_id++;
-            Packet packet = make_pool_job(worker, job_id, feature, in_h, in_w, ch,
-                                          kernel, stride, base, c_count);
+            Packet packet = make_pool_compute(workers[i], job_id, in_h, in_w, ch,
+                                              kernel, stride, starts[i], counts[i]);
             send_packet(packet);
+        }
+
+        for (size_t i = 0; i < workers.size(); i++)
+        {
             Packet result = receive_packet();
             merge_channel_result(output, result);
-            base += c_count;
         }
 
         return output;
@@ -431,16 +455,38 @@ SC_MODULE(Controller)
         vector<float> bias = read_rom_vector(layer, true, out_size);
         vector<float> output(out_size, 0.0f);
 
+        vector<int> workers;
+        vector<int> starts;
+        vector<int> counts;
+
         int base = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_size; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
             int o_count = (out_size - base + remaining_workers - 1) / remaining_workers;
-            int job_id = next_job_id++;
-            Packet packet = make_fc_job(worker, job_id, feature, weight, bias,
-                                        out_size, base, o_count, apply_relu);
-            send_packet(packet);
+            vector<float> weight_part = slice_fc_weight(weight, base, o_count, in_size);
+            vector<float> bias_part(bias.begin() + base, bias.begin() + base + o_count);
 
+            send_packet(make_load_packet(worker, OP_LOAD_INPUT, layer, feature));
+            send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
+            send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
+
+            workers.push_back(worker);
+            starts.push_back(base);
+            counts.push_back(o_count);
+            base += o_count;
+        }
+
+        for (size_t i = 0; i < workers.size(); i++)
+        {
+            int job_id = next_job_id++;
+            Packet packet = make_fc_compute(workers[i], job_id, in_size, out_size,
+                                            starts[i], counts[i], apply_relu);
+            send_packet(packet);
+        }
+
+        for (size_t i = 0; i < workers.size(); i++)
+        {
             Packet result = receive_packet();
             int p = 0;
             int result_job_id = (int)result.datas[p++];
@@ -450,8 +496,6 @@ SC_MODULE(Controller)
             for (int j = 0; j < count; j++)
                 output[start + j] = result.datas[p++];
             (void)result_job_id;
-
-            base += o_count;
         }
 
         return output;
@@ -535,7 +579,7 @@ SC_MODULE(Controller)
         layer_id_type.write(false);
         layer_id_valid.write(false);
         req_tx.write(false);
-        ack_rx.write(false);
+        ack_rx.write(true);
         flit_tx.write(0);
 
         wait();
