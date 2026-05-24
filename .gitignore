@@ -1,3 +1,34 @@
+# TA submission folder
 09_SUBMIT/
-*weight.txt
+
+# Dataset / model data
 data/
+*weight.txt
+*bias.txt
+
+# Simulation output logs
+result_cat.log
+result_dog.log
+result_cat_golden.log
+result_dog_golden.log
+*.log
+
+# Build artifacts
+*.o
+*.d
+*.so
+*.a
+run
+a.out
+
+# Submission archive
+*.tar.gz
+*.zip
+
+# Temporary files
+*~
+.DS_Store
+
+# redundant files
+/Makefile
+/hello.cpp
