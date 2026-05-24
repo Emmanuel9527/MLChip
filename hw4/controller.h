@@ -16,24 +16,36 @@
 using namespace std;
 
 SC_MODULE( Controller ) {
+    // Global clock and reset from the HW4 top-level testbench.
     sc_in  < bool >  rst;
     sc_in  < bool >  clk;
 
+    // ROM command interface.
+    // layer_id selects input image / conv layers / fc layers, layer_id_type
+    // selects weight or bias, and layer_id_valid is the one-cycle request pulse.
     sc_out < int >   layer_id;
     sc_out < bool >  layer_id_type;
     sc_out < bool >  layer_id_valid;
 
+    // ROM streaming data interface. The ROM file keeps float data ports, so the
+    // controller reads float values and promotes them to double for computation.
     sc_in  < float > data;
     sc_in  < bool >  data_valid;
 
+    // Router / NoC local transmit interface required by the HW4 hardware setup.
+    // This implementation keeps the ports connected and initialized even though
+    // the AlexNet computation is scheduled inside this controller thread.
     sc_out < sc_lv<34> > flit_tx;
     sc_out < bool > req_tx;
     sc_in  < bool > ack_tx;
 
+    // Router / NoC local receive interface required by the HW4 hardware setup.
+    // ack_rx is held ready so the connected router endpoint has a legal handshake.
     sc_in  < sc_lv<34> > flit_rx;
     sc_in  < bool > req_rx;
     sc_out < bool > ack_rx;
 
+    // Input image and zero-padding dimensions used by AlexNet conv1.
     static const int IMG_H = 224;
     static const int IMG_W = 224;
     static const int IMG_C = 3;
@@ -41,11 +53,15 @@ SC_MODULE( Controller ) {
     static const int ZP_H = 227;
     static const int ZP_W = 227;
 
+    // Channel-major tensor index helper: [channel][height][width].
+    // This matches the data layout used in hw1 for image, feature maps, and weights.
     static int idx3(int c, int h, int w, int height, int width)
     {
         return c * height * width + h * width + w;
     }
 
+    // Send one ROM request. The valid signal is asserted for exactly one clock
+    // cycle, matching the ROM protocol provided by the HW4 template.
     void request_rom(int id, bool type)
     {
         layer_id.write(id);
@@ -55,6 +71,9 @@ SC_MODULE( Controller ) {
         layer_id_valid.write(false);
     }
 
+    // Read one complete vector from ROM after issuing a layer request.
+    // The controller waits for data_valid to rise, collects values while it is
+    // high, and checks that the file length matches the expected layer size.
     vector<double> read_rom_vector(int id, bool type, int expected)
     {
         vector<double> values;
@@ -85,6 +104,8 @@ SC_MODULE( Controller ) {
         return values;
     }
 
+    // Initial AlexNet zero padding. The 224x224 image is placed inside a
+    // 227x227 tensor using the same offset as hw1 ZeroPadding.
     vector<double> zero_pad_224_to_227(const vector<double> &input)
     {
         vector<double> output(ZP_H * ZP_W * IMG_C, 0.0);
@@ -96,6 +117,8 @@ SC_MODULE( Controller ) {
         return output;
     }
 
+    // Generic symmetric zero-padding used before conv2 to conv5.
+    // This mirrors the hw1 PaddingLayer behavior for intermediate feature maps.
     vector<double> pad_layer(const vector<double> &input, int in_h, int in_w, int ch, int pad)
     {
         int out_h = in_h + 2 * pad;
@@ -110,6 +133,9 @@ SC_MODULE( Controller ) {
         return output;
     }
 
+    // Convolution datapath model.
+    // For each output channel and output pixel, it accumulates bias plus
+    // input * weight over all input channels and kernel positions.
     vector<double> conv_layer(const vector<double> &input,
                               const vector<double> &weight,
                               const vector<double> &bias,
@@ -150,6 +176,7 @@ SC_MODULE( Controller ) {
         return output;
     }
 
+    // ReLU activation used after conv1 to conv5 and fc6 to fc7.
     void relu_inplace(vector<double> &values)
     {
         for (size_t i = 0; i < values.size(); i++)
@@ -157,6 +184,8 @@ SC_MODULE( Controller ) {
                 values[i] = 0.0;
     }
 
+    // Max-pooling datapath model for pool1, pool2, and pool5.
+    // The shape parameters follow the AlexNet layer configuration.
     vector<double> max_pool(const vector<double> &input, int in_h, int in_w, int ch, int kernel, int stride)
     {
         int out_h = (in_h - kernel) / stride + 1;
@@ -178,6 +207,8 @@ SC_MODULE( Controller ) {
         return output;
     }
 
+    // Fully connected datapath model for fc6, fc7, and fc8.
+    // Weights are stored in row-major order by output neuron.
     vector<double> fc_layer(const vector<double> &input,
                             const vector<double> &weight,
                             const vector<double> &bias,
@@ -197,6 +228,7 @@ SC_MODULE( Controller ) {
         return output;
     }
 
+    // Numerically stable softmax for the final 1000 class scores.
     vector<double> softmax(const vector<double> &input)
     {
         vector<double> output(input.size(), 0.0);
@@ -213,6 +245,8 @@ SC_MODULE( Controller ) {
         return output;
     }
 
+    // Convenience wrapper for a convolution layer:
+    // fetch weights and bias from ROM, run convolution, then apply ReLU.
     void load_and_run_conv(vector<double> &feature,
                            int layer,
                            int in_h, int in_w, int in_ch,
@@ -222,9 +256,11 @@ SC_MODULE( Controller ) {
         vector<double> weight = read_rom_vector(layer, false, weight_count);
         vector<double> bias = read_rom_vector(layer, true, out_ch);
         feature = conv_layer(feature, weight, bias, in_h, in_w, in_ch, out_ch, kernel, stride);
-        relu_inplace(feature);
+            relu_inplace(feature);
     }
 
+    // Convenience wrapper for a fully connected layer:
+    // fetch weights and bias from ROM, run FC, and optionally apply ReLU.
     void load_and_run_fc(vector<double> &feature, int layer, int out_size, bool apply_relu)
     {
         int weight_count = out_size * (int)feature.size();
@@ -235,6 +271,7 @@ SC_MODULE( Controller ) {
             relu_inplace(feature);
     }
 
+    // Load the ImageNet label table used when printing the top-100 result.
     vector<string> read_class_names()
     {
         vector<string> names;
@@ -245,11 +282,13 @@ SC_MODULE( Controller ) {
         return names;
     }
 
+    // Sort helper for probabilities in descending order.
     static bool prob_greater(const pair<double, int> &a, const pair<double, int> &b)
     {
         return a.first > b.first;
     }
 
+    // Print the final classification table in the same format as hw1 Pattern.
     void print_top100(const vector<double> &linear, const vector<double> &prob)
     {
         vector<pair<double, int> > order;
@@ -281,8 +320,14 @@ SC_MODULE( Controller ) {
         cout << "=================================================" << endl;
     }
 
+    // Main controller schedule.
+    // This thread follows the HW4 top-level hardware configuration: it resets
+    // the ROM request lines and router endpoint, waits for reset deassertion,
+    // streams each required tensor from ROM, and executes AlexNet in order.
     void run()
     {
+        // Default output values keep the ROM and router interfaces in a known
+        // idle state before the actual AlexNet schedule starts.
         layer_id.write(0);
         layer_id_type.write(false);
         layer_id_valid.write(false);
@@ -295,36 +340,44 @@ SC_MODULE( Controller ) {
             wait();
         wait();
 
+        // Input image and conv1: ROM image -> zero padding -> conv1 -> ReLU -> pool1.
         vector<double> feature = read_rom_vector(0, false, IMG_H * IMG_W * IMG_C);
         feature = zero_pad_224_to_227(feature);
 
         load_and_run_conv(feature, 1, 227, 227, 3, 64, 11, 4);
         feature = max_pool(feature, 55, 55, 64, 3, 2);
 
+        // conv2 block: padding -> conv2 -> ReLU -> pool2.
         feature = pad_layer(feature, 27, 27, 64, 2);
         load_and_run_conv(feature, 2, 31, 31, 64, 192, 5, 1);
         feature = max_pool(feature, 27, 27, 192, 3, 2);
 
+        // conv3 block: padding -> conv3 -> ReLU.
         feature = pad_layer(feature, 13, 13, 192, 1);
         load_and_run_conv(feature, 3, 15, 15, 192, 384, 3, 1);
 
+        // conv4 block: padding -> conv4 -> ReLU.
         feature = pad_layer(feature, 13, 13, 384, 1);
         load_and_run_conv(feature, 4, 15, 15, 384, 256, 3, 1);
 
+        // conv5 block: padding -> conv5 -> ReLU -> pool5.
         feature = pad_layer(feature, 13, 13, 256, 1);
         load_and_run_conv(feature, 5, 15, 15, 256, 256, 3, 1);
         feature = max_pool(feature, 13, 13, 256, 3, 2);
 
+        // Fully connected classifier: fc6 -> ReLU -> fc7 -> ReLU -> fc8.
         load_and_run_fc(feature, 6, 4096, true);
         load_and_run_fc(feature, 7, 4096, true);
         load_and_run_fc(feature, 8, 1000, false);
 
+        // Convert fc8 scores to probabilities and print the required top-100 table.
         vector<double> linear = feature;
         vector<double> prob = softmax(linear);
         print_top100(linear, prob);
         sc_stop();
     }
 
+    // Register the controller as one clocked SystemC thread.
     SC_CTOR( Controller )
     {
         SC_THREAD( run );

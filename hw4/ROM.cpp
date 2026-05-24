@@ -9,14 +9,14 @@ void ROM::run()
     ifstream file;
     float value;
     bool is_reading_data = false;
-
-    while (rst.read())
+    
+    while(rst.read())
         wait();
-    while (true)
+    while(true)
     {
-        if (!is_reading_data)
+        if(!is_reading_data)
         {
-            if (layer_id_valid.read())
+            if(layer_id_valid.read())
             {
                 // Read signals
                 id = layer_id.read();
@@ -57,18 +57,18 @@ void ROM::run()
                 is_reading_data = true;
             }
         }
-        else
+        else 
         {
-            if (layer_id_valid.read())
+            if(layer_id_valid.read())
             {
                 cout << "Error: layer_id_valid should be low when reading data." << endl;
                 sc_stop();
             }
             data_valid.write(true);
             file >> value;
-            if (file.eof())
+            if(file.eof())
             {
-                // cout << "End of file reached for layer " << layer_id.read() << endl;
+                //cout << "End of file reached for layer " << layer_id.read() << endl;
                 file.close();
                 data_valid.write(false);
                 data.write(0);
@@ -76,7 +76,7 @@ void ROM::run()
                 continue;
             }
             data.write(value);
-            // cout << "Layer " << layer_id.read() << " data: " << value << endl;
+            //cout << "Layer " << layer_id.read() << " data: " << value << endl;
         }
         wait();
     }
