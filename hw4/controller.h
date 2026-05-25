@@ -9,21 +9,23 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 using namespace std;
 
+#define DEBUG_PROGRESS true
+
 SC_MODULE(Controller)
 {
-    // Global clock and reset from the HW4 top-level testbench.
     sc_in<bool> rst;
     sc_in<bool> clk;
 
-    // ROM command interface. The ROM itself is kept unchanged.
+    // ROM command interface.
     sc_out<int> layer_id;
-    sc_out<bool> layer_id_type;
+    sc_out<bool> layer_id_type; // false = weight, true = bias
     sc_out<bool> layer_id_valid;
 
     // ROM streaming data interface.
@@ -57,6 +59,20 @@ SC_MODULE(Controller)
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
 
+    void debug_log(const string &msg)
+    {
+        if (DEBUG_PROGRESS)
+            cout << "[DEBUG] " << msg << endl;
+    }
+
+    template <typename T>
+    string num_to_string(T value)
+    {
+        ostringstream oss;
+        oss << value;
+        return oss.str();
+    }
+
     // Channel-major tensor addressing helper: tensor[c][h][w].
     static int idx3(int c, int h, int w, int height, int width)
     {
@@ -79,6 +95,10 @@ SC_MODULE(Controller)
     {
         vector<float> values;
         values.reserve(expected);
+        if (id == 0)
+            debug_log("Requesting ROM image data.");
+        else
+            debug_log(string("Requesting ROM layer ") + num_to_string(id) + (type ? " bias." : " weight."));
         request_rom(id, type);
 
         bool started = false;
@@ -102,6 +122,9 @@ SC_MODULE(Controller)
             cout << "Expected " << expected << ", got " << values.size() << "." << endl;
             sc_stop();
         }
+        debug_log(string("Finished ROM read: layer ") + num_to_string(id) +
+                  (type ? " bias, " : " weight/image, ") +
+                  num_to_string(values.size()) + " values.");
         return values;
     }
 
@@ -272,12 +295,15 @@ SC_MODULE(Controller)
     // injects one packet instead of unicasting the same tensor to each PE.
     void broadcast_input_to_workers(int layer, const vector<float> &payload)
     {
+        debug_log(string("Broadcasting input buffer for layer ") + num_to_string(layer) +
+                  " to worker PEs, values=" + num_to_string(payload.size()) + ".");
         send_packet(make_load_packet(BROADCAST_WORKERS, OP_LOAD_INPUT, layer, payload));
 
         // The broadcast has no response packet. Wait a small number of cycles
         // for the tail flit to drain through the 4x4 tree before compute starts.
         for (int i = 0; i < 64; i++)
             wait();
+        debug_log(string("Finished input broadcast for layer ") + num_to_string(layer) + ".");
     }
 
     // Build a small convolution compute command.
@@ -369,6 +395,7 @@ SC_MODULE(Controller)
                                   int in_h, int in_w, int in_ch,
                                   int out_ch, int kernel, int stride)
     {
+        debug_log(string("Starting CONV layer ") + num_to_string(layer) + ".");
         int weight_count = out_ch * in_ch * kernel * kernel;
         vector<float> weight = read_rom_vector(layer, false, weight_count);
         vector<float> bias = read_rom_vector(layer, true, out_ch);
@@ -390,6 +417,10 @@ SC_MODULE(Controller)
             vector<float> weight_part = slice_conv_weight(weight, base, oc_count, in_ch, kernel);
             vector<float> bias_part(bias.begin() + base, bias.begin() + base + oc_count);
 
+            debug_log(string("Preloading CONV layer ") + num_to_string(layer) +
+                      " worker PE " + num_to_string(worker) +
+                      ", output channels [" + num_to_string(base) + ", " +
+                      num_to_string(base + oc_count - 1) + "].");
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
 
@@ -405,15 +436,19 @@ SC_MODULE(Controller)
             Packet packet = make_conv_compute(workers[i], job_id,
                                               in_h, in_w, in_ch, out_ch, kernel, stride,
                                               starts[i], counts[i]);
+            debug_log(string("Dispatching CONV job ") + num_to_string(job_id) +
+                      " to PE " + num_to_string(workers[i]) + ".");
             send_packet(packet);
         }
 
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
+            debug_log(string("Received CONV result from PE ") + num_to_string(result.source_id) + ".");
             merge_channel_result(output, result);
         }
 
+        debug_log(string("Finished CONV layer ") + num_to_string(layer) + ".");
         return output;
     }
 
@@ -423,6 +458,7 @@ SC_MODULE(Controller)
                                   int in_h, int in_w, int ch,
                                   int kernel, int stride)
     {
+        debug_log("Starting POOL layer.");
         int out_h = (in_h - kernel) / stride + 1;
         int out_w = (in_w - kernel) / stride + 1;
         vector<float> output(out_h * out_w * ch, 0.0f);
@@ -439,6 +475,9 @@ SC_MODULE(Controller)
             int remaining_workers = LAST_WORKER - worker + 1;
             int c_count = (ch - base + remaining_workers - 1) / remaining_workers;
 
+            debug_log(string("Preparing POOL worker PE ") + num_to_string(worker) +
+                      ", channels [" + num_to_string(base) + ", " +
+                      num_to_string(base + c_count - 1) + "].");
             workers.push_back(worker);
             starts.push_back(base);
             counts.push_back(c_count);
@@ -450,15 +489,19 @@ SC_MODULE(Controller)
             int job_id = next_job_id++;
             Packet packet = make_pool_compute(workers[i], job_id, in_h, in_w, ch,
                                               kernel, stride, starts[i], counts[i]);
+            debug_log(string("Dispatching POOL job ") + num_to_string(job_id) +
+                      " to PE " + num_to_string(workers[i]) + ".");
             send_packet(packet);
         }
 
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
+            debug_log(string("Received POOL result from PE ") + num_to_string(result.source_id) + ".");
             merge_channel_result(output, result);
         }
 
+        debug_log("Finished POOL layer.");
         return output;
     }
 
@@ -466,6 +509,7 @@ SC_MODULE(Controller)
     vector<float> run_fc_on_pes(const vector<float> &feature,
                                 int layer, int out_size, bool apply_relu)
     {
+        debug_log(string("Starting FC layer ") + num_to_string(layer) + ".");
         int in_size = (int)feature.size();
         vector<float> weight = read_rom_vector(layer, false, out_size * in_size);
         vector<float> bias = read_rom_vector(layer, true, out_size);
@@ -485,6 +529,10 @@ SC_MODULE(Controller)
             vector<float> weight_part = slice_fc_weight(weight, base, o_count, in_size);
             vector<float> bias_part(bias.begin() + base, bias.begin() + base + o_count);
 
+            debug_log(string("Preloading FC layer ") + num_to_string(layer) +
+                      " worker PE " + num_to_string(worker) +
+                      ", output neurons [" + num_to_string(base) + ", " +
+                      num_to_string(base + o_count - 1) + "].");
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
 
@@ -499,12 +547,15 @@ SC_MODULE(Controller)
             int job_id = next_job_id++;
             Packet packet = make_fc_compute(workers[i], job_id, in_size, out_size,
                                             starts[i], counts[i], apply_relu);
+            debug_log(string("Dispatching FC job ") + num_to_string(job_id) +
+                      " to PE " + num_to_string(workers[i]) + ".");
             send_packet(packet);
         }
 
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
+            debug_log(string("Received FC result from PE ") + num_to_string(result.source_id) + ".");
             int p = 0;
             int result_job_id = (int)result.datas[p++];
             int start = (int)result.datas[p++];
@@ -515,6 +566,7 @@ SC_MODULE(Controller)
             (void)result_job_id;
         }
 
+        debug_log(string("Finished FC layer ") + num_to_string(layer) + ".");
         return output;
     }
 
@@ -591,6 +643,7 @@ SC_MODULE(Controller)
     // and advance through the AlexNet layer order.
     void run()
     {
+        debug_log("Controller reset initialization.");
         next_job_id = 1;
         layer_id.write(0);
         layer_id_type.write(false);
@@ -603,39 +656,48 @@ SC_MODULE(Controller)
         while (rst.read())
             wait();
         wait();
+        debug_log("Reset deasserted. Starting AlexNet schedule.");
 
         // Input image -> zero padding.
         vector<float> feature = read_rom_vector(0, false, IMG_H * IMG_W * IMG_C);
         feature = zero_pad_224_to_227(feature);
+        debug_log("Finished input zero padding.");
 
         // conv1 -> ReLU in PE -> pool1 in PE.
+        debug_log("Entering conv1/pool1 block.");
         feature = run_conv_on_pes(feature, 1, 227, 227, 3, 64, 11, 4);
         feature = run_pool_on_pes(feature, 55, 55, 64, 3, 2);
 
         // conv2 block: padding in Controller, conv/ReLU/pool in PEs.
+        debug_log("Entering conv2/pool2 block.");
         feature = pad_layer(feature, 27, 27, 64, 2);
         feature = run_conv_on_pes(feature, 2, 31, 31, 64, 192, 5, 1);
         feature = run_pool_on_pes(feature, 27, 27, 192, 3, 2);
 
         // conv3 block.
+        debug_log("Entering conv3 block.");
         feature = pad_layer(feature, 13, 13, 192, 1);
         feature = run_conv_on_pes(feature, 3, 15, 15, 192, 384, 3, 1);
 
         // conv4 block.
+        debug_log("Entering conv4 block.");
         feature = pad_layer(feature, 13, 13, 384, 1);
         feature = run_conv_on_pes(feature, 4, 15, 15, 384, 256, 3, 1);
 
         // conv5 block and final convolutional pooling.
+        debug_log("Entering conv5/pool5 block.");
         feature = pad_layer(feature, 13, 13, 256, 1);
         feature = run_conv_on_pes(feature, 5, 15, 15, 256, 256, 3, 1);
         feature = run_pool_on_pes(feature, 13, 13, 256, 3, 2);
 
         // Fully connected classifier.
+        debug_log("Entering fully connected classifier.");
         feature = run_fc_on_pes(feature, 6, 4096, true);
         feature = run_fc_on_pes(feature, 7, 4096, true);
         feature = run_fc_on_pes(feature, 8, 1000, false);
 
         // Output conversion and report.
+        debug_log("Computing softmax and printing Top-100 output.");
         vector<double> prob = softmax(feature);
         print_top100(feature, prob);
         sc_stop();
