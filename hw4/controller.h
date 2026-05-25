@@ -430,7 +430,6 @@ SC_MODULE(Controller)
         broadcast_input_to_workers(layer, feature);
 
         int base = 0;
-        int load_ack_count = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_ch; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
@@ -444,14 +443,14 @@ SC_MODULE(Controller)
                       num_to_string(base + oc_count - 1) + "].");
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
-            load_ack_count += 2;
+            wait_for_load_acks(2, string("CONV layer ") + num_to_string(layer) +
+                               " weight/bias for PE " + num_to_string(worker));
 
             workers.push_back(worker);
             starts.push_back(base);
             counts.push_back(oc_count);
             base += oc_count;
         }
-        wait_for_load_acks(load_ack_count, string("CONV layer ") + num_to_string(layer) + " weight/bias");
 
         for (size_t i = 0; i < workers.size(); i++)
         {
@@ -557,7 +556,6 @@ SC_MODULE(Controller)
         broadcast_input_to_workers(layer, feature);
 
         int base = 0;
-        int load_ack_count = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_size; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
@@ -571,14 +569,14 @@ SC_MODULE(Controller)
                       num_to_string(base + o_count - 1) + "].");
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
-            load_ack_count += 2;
+            wait_for_load_acks(2, string("FC layer ") + num_to_string(layer) +
+                               " weight/bias for PE " + num_to_string(worker));
 
             workers.push_back(worker);
             starts.push_back(base);
             counts.push_back(o_count);
             base += o_count;
         }
-        wait_for_load_acks(load_ack_count, string("FC layer ") + num_to_string(layer) + " weight/bias");
 
         for (size_t i = 0; i < workers.size(); i++)
         {
