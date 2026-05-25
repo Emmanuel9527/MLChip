@@ -185,6 +185,11 @@ SC_MODULE( Router ) {
         return input_port * VC_NUM + vc;
     }
 
+    int encode_broadcast_lock(int input_port)
+    {
+        return PORT_NUM * VC_NUM + input_port;
+    }
+
     void clear_broadcast_mask(int input_port)
     {
         for (int out = 0; out < PORT_NUM; out++)
@@ -228,10 +233,45 @@ SC_MODULE( Router ) {
 
     bool broadcast_outputs_have_space(int input_port)
     {
+        int lock_id = encode_broadcast_lock(input_port);
         for (int out = 0; out < PORT_NUM; out++)
-            if (broadcast_mask[input_port][out] && !output_has_space(out))
+        {
+            if (!broadcast_mask[input_port][out])
+                continue;
+            if (!output_has_space(out))
                 return false;
+            if (out_port_lock[out] != lock_id)
+                return false;
+        }
         return true;
+    }
+
+    bool broadcast_outputs_can_allocate(int input_port)
+    {
+        for (int out = 0; out < PORT_NUM; out++)
+        {
+            if (!broadcast_mask[input_port][out])
+                continue;
+            if (!output_has_space(out) || out_port_lock[out] != -1)
+                return false;
+        }
+        return true;
+    }
+
+    void allocate_broadcast_outputs(int input_port)
+    {
+        int lock_id = encode_broadcast_lock(input_port);
+        for (int out = 0; out < PORT_NUM; out++)
+            if (broadcast_mask[input_port][out])
+                out_port_lock[out] = lock_id;
+    }
+
+    void release_broadcast_outputs(int input_port)
+    {
+        int lock_id = encode_broadcast_lock(input_port);
+        for (int out = 0; out < PORT_NUM; out++)
+            if (out_port_lock[out] == lock_id)
+                out_port_lock[out] = -1;
     }
 
     bool ready_for_broadcast_input(int input_port)
@@ -245,6 +285,7 @@ SC_MODULE( Router ) {
             if (flit_type(incoming) != HEAD_FLIT || !is_broadcast_flit(incoming))
                 return false;
             build_broadcast_mask(input_port);
+            return broadcast_outputs_can_allocate(input_port);
         }
 
         return broadcast_outputs_have_space(input_port);
@@ -263,6 +304,9 @@ SC_MODULE( Router ) {
             if (type != HEAD_FLIT || !is_broadcast_flit(incoming))
                 return false;
             build_broadcast_mask(input_port);
+            if (!broadcast_outputs_can_allocate(input_port))
+                return false;
+            allocate_broadcast_outputs(input_port);
             broadcast_active[input_port] = true;
         }
 
@@ -275,6 +319,7 @@ SC_MODULE( Router ) {
 
         if (type == TAIL_FLIT)
         {
+            release_broadcast_outputs(input_port);
             broadcast_active[input_port] = false;
             clear_broadcast_mask(input_port);
         }
@@ -428,6 +473,7 @@ SC_MODULE( Router ) {
             if (rst.read())
             {
                 rx_current_vc[input_port] = -1;
+                release_broadcast_outputs(input_port);
                 broadcast_active[input_port] = false;
                 clear_broadcast_mask(input_port);
                 out_ack[input_port].write(false);

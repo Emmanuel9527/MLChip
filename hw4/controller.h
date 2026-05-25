@@ -59,6 +59,7 @@ SC_MODULE(Controller)
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
+    vector<Packet> pending_packets;
 
     void debug_log(const string &msg)
     {
@@ -219,27 +220,73 @@ SC_MODULE(Controller)
         }
     }
 
-    Packet receive_specific_packet(int first_word)
+    bool packet_first_word_is(const Packet &packet, int first_word)
+    {
+        return !packet.datas.empty() && (int)packet.datas[0] == first_word;
+    }
+
+    Packet take_pending_packet(size_t index)
+    {
+        Packet packet = pending_packets[index];
+        pending_packets.erase(pending_packets.begin() + index);
+        return packet;
+    }
+
+    Packet receive_specific_packet(int first_word, int expected_source)
     {
         while (true)
         {
+            for (size_t i = 0; i < pending_packets.size(); i++)
+            {
+                if (packet_first_word_is(pending_packets[i], first_word) &&
+                    (expected_source < 0 || pending_packets[i].source_id == expected_source))
+                    return take_pending_packet(i);
+            }
+
             Packet packet = receive_packet();
-            if (!packet.datas.empty() && (int)packet.datas[0] == first_word)
+            if (packet_first_word_is(packet, first_word) &&
+                (expected_source < 0 || packet.source_id == expected_source))
                 return packet;
+
+            pending_packets.push_back(packet);
             debug_log(string("Skipping unexpected packet from PE ") +
                       num_to_string(packet.source_id) + " while waiting for packet type " +
                       num_to_string(first_word) + ".");
         }
     }
 
-    void wait_for_load_acks(int expected, const string &label)
+    Packet receive_compute_result()
+    {
+        while (true)
+        {
+            for (size_t i = 0; i < pending_packets.size(); i++)
+            {
+                if (!packet_first_word_is(pending_packets[i], LOAD_ACK_WORD))
+                    return take_pending_packet(i);
+            }
+
+            Packet packet = receive_packet();
+            if (!packet_first_word_is(packet, LOAD_ACK_WORD))
+                return packet;
+
+            debug_log(string("Dropping stale load ACK from PE ") +
+                      num_to_string(packet.source_id) + ".");
+        }
+    }
+
+    void wait_for_load_acks(int expected, const string &label, int expected_source)
     {
         for (int i = 0; i < expected; i++)
         {
-            Packet ack = receive_specific_packet(LOAD_ACK_WORD);
+            Packet ack = receive_specific_packet(LOAD_ACK_WORD, expected_source);
             debug_log(string("Received ") + label + " ACK from PE " +
                       num_to_string(ack.source_id) + ".");
         }
+    }
+
+    void wait_for_load_acks(int expected, const string &label)
+    {
+        wait_for_load_acks(expected, label, -1);
     }
 
     // Initial image padding before conv1.
@@ -444,7 +491,8 @@ SC_MODULE(Controller)
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
             wait_for_load_acks(2, string("CONV layer ") + num_to_string(layer) +
-                               " weight/bias for PE " + num_to_string(worker));
+                               " weight/bias for PE " + num_to_string(worker),
+                               worker);
 
             workers.push_back(worker);
             starts.push_back(base);
@@ -465,13 +513,7 @@ SC_MODULE(Controller)
 
         for (size_t i = 0; i < workers.size(); i++)
         {
-            Packet result = receive_packet();
-            if (!result.datas.empty() && (int)result.datas[0] == LOAD_ACK_WORD)
-            {
-                debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
-                i--;
-                continue;
-            }
+            Packet result = receive_compute_result();
             debug_log(string("Received CONV result from PE ") + num_to_string(result.source_id) + ".");
             merge_channel_result(output, result);
         }
@@ -524,13 +566,7 @@ SC_MODULE(Controller)
 
         for (size_t i = 0; i < workers.size(); i++)
         {
-            Packet result = receive_packet();
-            if (!result.datas.empty() && (int)result.datas[0] == LOAD_ACK_WORD)
-            {
-                debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
-                i--;
-                continue;
-            }
+            Packet result = receive_compute_result();
             debug_log(string("Received POOL result from PE ") + num_to_string(result.source_id) + ".");
             merge_channel_result(output, result);
         }
@@ -570,7 +606,8 @@ SC_MODULE(Controller)
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
             wait_for_load_acks(2, string("FC layer ") + num_to_string(layer) +
-                               " weight/bias for PE " + num_to_string(worker));
+                               " weight/bias for PE " + num_to_string(worker),
+                               worker);
 
             workers.push_back(worker);
             starts.push_back(base);
@@ -590,13 +627,7 @@ SC_MODULE(Controller)
 
         for (size_t i = 0; i < workers.size(); i++)
         {
-            Packet result = receive_packet();
-            if (!result.datas.empty() && (int)result.datas[0] == LOAD_ACK_WORD)
-            {
-                debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
-                i--;
-                continue;
-            }
+            Packet result = receive_compute_result();
             debug_log(string("Received FC result from PE ") + num_to_string(result.source_id) + ".");
             int p = 0;
             int result_job_id = (int)result.datas[p++];
