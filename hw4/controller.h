@@ -218,6 +218,29 @@ SC_MODULE(Controller)
         }
     }
 
+    Packet receive_specific_packet(int first_word)
+    {
+        while (true)
+        {
+            Packet packet = receive_packet();
+            if (!packet.datas.empty() && (int)packet.datas[0] == first_word)
+                return packet;
+            debug_log(string("Skipping unexpected packet from PE ") +
+                      num_to_string(packet.source_id) + " while waiting for packet type " +
+                      num_to_string(first_word) + ".");
+        }
+    }
+
+    void wait_for_load_acks(int expected, const string &label)
+    {
+        for (int i = 0; i < expected; i++)
+        {
+            Packet ack = receive_specific_packet(OP_LOAD_ACK);
+            debug_log(string("Received ") + label + " ACK from PE " +
+                      num_to_string(ack.source_id) + ".");
+        }
+    }
+
     // Initial image padding before conv1.
     vector<float> zero_pad_224_to_227(const vector<float> &input)
     {
@@ -298,11 +321,7 @@ SC_MODULE(Controller)
         debug_log(string("Broadcasting input buffer for layer ") + num_to_string(layer) +
                   " to worker PEs, values=" + num_to_string(payload.size()) + ".");
         send_packet(make_load_packet(BROADCAST_WORKERS, OP_LOAD_INPUT, layer, payload));
-
-        // The broadcast has no response packet. Wait a small number of cycles
-        // for the tail flit to drain through the 4x4 tree before compute starts.
-        for (int i = 0; i < 64; i++)
-            wait();
+        wait_for_load_acks(WORKER_COUNT, "input broadcast");
         debug_log(string("Finished input broadcast for layer ") + num_to_string(layer) + ".");
     }
 
@@ -410,6 +429,7 @@ SC_MODULE(Controller)
         broadcast_input_to_workers(layer, feature);
 
         int base = 0;
+        int load_ack_count = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_ch; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
@@ -423,12 +443,14 @@ SC_MODULE(Controller)
                       num_to_string(base + oc_count - 1) + "].");
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
+            load_ack_count += 2;
 
             workers.push_back(worker);
             starts.push_back(base);
             counts.push_back(oc_count);
             base += oc_count;
         }
+        wait_for_load_acks(load_ack_count, string("CONV layer ") + num_to_string(layer) + " weight/bias");
 
         for (size_t i = 0; i < workers.size(); i++)
         {
@@ -444,6 +466,12 @@ SC_MODULE(Controller)
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
+            if (!result.datas.empty() && (int)result.datas[0] == OP_LOAD_ACK)
+            {
+                debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
+                i--;
+                continue;
+            }
             debug_log(string("Received CONV result from PE ") + num_to_string(result.source_id) + ".");
             merge_channel_result(output, result);
         }
@@ -497,6 +525,12 @@ SC_MODULE(Controller)
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
+            if (!result.datas.empty() && (int)result.datas[0] == OP_LOAD_ACK)
+            {
+                debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
+                i--;
+                continue;
+            }
             debug_log(string("Received POOL result from PE ") + num_to_string(result.source_id) + ".");
             merge_channel_result(output, result);
         }
@@ -522,6 +556,7 @@ SC_MODULE(Controller)
         broadcast_input_to_workers(layer, feature);
 
         int base = 0;
+        int load_ack_count = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_size; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
@@ -535,12 +570,14 @@ SC_MODULE(Controller)
                       num_to_string(base + o_count - 1) + "].");
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
+            load_ack_count += 2;
 
             workers.push_back(worker);
             starts.push_back(base);
             counts.push_back(o_count);
             base += o_count;
         }
+        wait_for_load_acks(load_ack_count, string("FC layer ") + num_to_string(layer) + " weight/bias");
 
         for (size_t i = 0; i < workers.size(); i++)
         {
@@ -555,6 +592,12 @@ SC_MODULE(Controller)
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
+            if (!result.datas.empty() && (int)result.datas[0] == OP_LOAD_ACK)
+            {
+                debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
+                i--;
+                continue;
+            }
             debug_log(string("Received FC result from PE ") + num_to_string(result.source_id) + ".");
             int p = 0;
             int result_job_id = (int)result.datas[p++];

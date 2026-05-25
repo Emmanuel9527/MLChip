@@ -26,7 +26,8 @@ enum PeOp {
     OP_LOAD_BIAS = 3,
     OP_COMPUTE_CONV = 4,
     OP_COMPUTE_POOL = 5,
-    OP_COMPUTE_FC = 6
+    OP_COMPUTE_FC = 6,
+    OP_LOAD_ACK = 7
 };
 
 SC_MODULE( PE ) {
@@ -63,17 +64,17 @@ SC_MODULE( PE ) {
         if (op == OP_LOAD_INPUT)
         {
             load_buffer(input_buf, job);
-            return NULL;
+            return make_load_ack(job);
         }
         if (op == OP_LOAD_WEIGHT)
         {
             load_buffer(weight_buf, job);
-            return NULL;
+            return make_load_ack(job);
         }
         if (op == OP_LOAD_BIAS)
         {
             load_buffer(bias_buf, job);
-            return NULL;
+            return make_load_ack(job);
         }
         if (op == OP_COMPUTE_CONV)
             return run_conv(job);
@@ -90,6 +91,17 @@ SC_MODULE( PE ) {
     {
         int payload_size = (int)job.datas[2];
         buffer.assign(job.datas.begin() + 3, job.datas.begin() + 3 + payload_size);
+    }
+
+    Packet *make_load_ack(const Packet &job)
+    {
+        Packet *result = new Packet();
+        result->source_id = id;
+        result->dest_id = job.source_id;
+        result->datas.push_back((float)OP_LOAD_ACK);
+        result->datas.push_back(job.datas[0]);
+        result->datas.push_back(job.datas[1]);
+        return result;
     }
 
     // Create a result packet addressed back to the original sender.
