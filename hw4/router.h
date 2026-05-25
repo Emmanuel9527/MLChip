@@ -9,6 +9,7 @@
 #define EAST  2
 #define WEST  3
 #define LOCAL 4
+#define BROADCAST_ID 65535
 
 using namespace std;
 
@@ -83,6 +84,8 @@ SC_MODULE( Router ) {
     int out_port_lock[PORT_NUM];
     int output_rr_start[PORT_NUM];
     int rx_current_vc[PORT_NUM];
+    bool broadcast_active[PORT_NUM];
+    bool broadcast_mask[PORT_NUM][PORT_NUM];
 
     // main.cpp assigns this router's mesh node id after construction.
     void init(int id)
@@ -100,6 +103,11 @@ SC_MODULE( Router ) {
     int flit_dest_id(const sc_lv<34> &flit)
     {
         return flit.range(31, 16).to_uint();
+    }
+
+    bool is_broadcast_flit(const sc_lv<34> &flit)
+    {
+        return flit_dest_id(flit) == BROADCAST_ID;
     }
 
     // Deterministic XY routing for a 4x4 mesh.
@@ -177,6 +185,103 @@ SC_MODULE( Router ) {
         return input_port * VC_NUM + vc;
     }
 
+    void clear_broadcast_mask(int input_port)
+    {
+        for (int out = 0; out < PORT_NUM; out++)
+            broadcast_mask[input_port][out] = false;
+    }
+
+    // Build a spanning-tree multicast mask for activation broadcast.
+    // Node 0 injects to EAST and SOUTH. The top row forwards EAST and SOUTH;
+    // each column then forwards SOUTH. Every worker receives exactly one copy.
+    void build_broadcast_mask(int input_port)
+    {
+        clear_broadcast_mask(input_port);
+
+        int x = router_id % 4;
+        int y = router_id / 4;
+
+        if (router_id != 0)
+            broadcast_mask[input_port][LOCAL] = true;
+
+        if (input_port == LOCAL)
+        {
+            if (x < 3)
+                broadcast_mask[input_port][EAST] = true;
+            if (y < 3)
+                broadcast_mask[input_port][SOUTH] = true;
+            return;
+        }
+
+        if (input_port == WEST && y == 0)
+        {
+            if (x < 3)
+                broadcast_mask[input_port][EAST] = true;
+            if (y < 3)
+                broadcast_mask[input_port][SOUTH] = true;
+            return;
+        }
+
+        if (input_port == NORTH && y < 3)
+            broadcast_mask[input_port][SOUTH] = true;
+    }
+
+    bool broadcast_outputs_have_space(int input_port)
+    {
+        for (int out = 0; out < PORT_NUM; out++)
+            if (broadcast_mask[input_port][out] && !output_has_space(out))
+                return false;
+        return true;
+    }
+
+    bool ready_for_broadcast_input(int input_port)
+    {
+        if (!in_req[input_port].read())
+            return true;
+
+        sc_lv<34> incoming = in_flit[input_port].read();
+        if (!broadcast_active[input_port])
+        {
+            if (flit_type(incoming) != HEAD_FLIT || !is_broadcast_flit(incoming))
+                return false;
+            build_broadcast_mask(input_port);
+        }
+
+        return broadcast_outputs_have_space(input_port);
+    }
+
+    bool accept_broadcast_input(int input_port)
+    {
+        if (!in_req[input_port].read() || !out_ack[input_port].read())
+            return false;
+
+        sc_lv<34> incoming = in_flit[input_port].read();
+        int type = flit_type(incoming);
+
+        if (!broadcast_active[input_port])
+        {
+            if (type != HEAD_FLIT || !is_broadcast_flit(incoming))
+                return false;
+            build_broadcast_mask(input_port);
+            broadcast_active[input_port] = true;
+        }
+
+        if (!broadcast_outputs_have_space(input_port))
+            return false;
+
+        for (int out = 0; out < PORT_NUM; out++)
+            if (broadcast_mask[input_port][out])
+                out_q[out].push(incoming);
+
+        if (type == TAIL_FLIT)
+        {
+            broadcast_active[input_port] = false;
+            clear_broadcast_mask(input_port);
+        }
+
+        return true;
+    }
+
     int xy_route(int current_id, int dest_id)
     {
         int cx = current_id % 4;
@@ -252,11 +357,17 @@ SC_MODULE( Router ) {
     // not on the sender's VALID policy.
     bool ready_for_input(int input_port)
     {
+        if (broadcast_active[input_port])
+            return ready_for_broadcast_input(input_port);
+
         if (!in_req[input_port].read())
             return any_vc_has_space(input_port);
 
         sc_lv<34> incoming = in_flit[input_port].read();
         int type = flit_type(incoming);
+
+        if (type == HEAD_FLIT && is_broadcast_flit(incoming))
+            return ready_for_broadcast_input(input_port);
 
         if (type == HEAD_FLIT)
             return choose_input_vc(input_port, incoming) != -1;
@@ -271,6 +382,18 @@ SC_MODULE( Router ) {
     InputResult accept_one_input(int input_port)
     {
         InputResult result;
+
+        if (broadcast_active[input_port] ||
+            (in_req[input_port].read() &&
+             flit_type(in_flit[input_port].read()) == HEAD_FLIT &&
+             is_broadcast_flit(in_flit[input_port].read())))
+        {
+            bool accepted = accept_broadcast_input(input_port);
+            result.accepted = accepted;
+            if (accepted)
+                result.flit_type = flit_type(in_flit[input_port].read());
+            return result;
+        }
 
         if (!in_req[input_port].read() || !out_ack[input_port].read())
             return result;
@@ -305,6 +428,8 @@ SC_MODULE( Router ) {
             if (rst.read())
             {
                 rx_current_vc[input_port] = -1;
+                broadcast_active[input_port] = false;
+                clear_broadcast_mask(input_port);
                 out_ack[input_port].write(false);
                 wait();
                 continue;
@@ -406,6 +531,8 @@ SC_MODULE( Router ) {
         {
             out_port_lock[p] = -1;
             output_rr_start[p] = 0;
+            broadcast_active[p] = false;
+            clear_broadcast_mask(p);
             clear_queue(out_q[p]);
 
             for (int vc = 0; vc < VC_NUM; vc++)
@@ -510,6 +637,7 @@ SC_MODULE( Router ) {
             out_port_lock[p] = -1;
             output_rr_start[p] = 0;
             rx_current_vc[p] = -1;
+            broadcast_active[p] = false;
             tx_active[p] = false;
             tx_buffer[p] = zero_flit;
             out_req[p].initialize(false);
@@ -518,6 +646,7 @@ SC_MODULE( Router ) {
 
             for (int vc = 0; vc < VC_NUM; vc++)
                 vc_state[p][vc] = -1;
+            clear_broadcast_mask(p);
         }
 
         SC_THREAD(input_thread_0);

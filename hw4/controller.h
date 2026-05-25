@@ -52,6 +52,7 @@ SC_MODULE(Controller)
     static const int FIRST_WORKER = 1;
     static const int LAST_WORKER = 15;
     static const int WORKER_COUNT = 15;
+    static const int BROADCAST_WORKERS = 65535;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
@@ -266,6 +267,19 @@ SC_MODULE(Controller)
         return packet;
     }
 
+    // Broadcast one activation/input tensor to every worker PE.
+    // The router implements this as a spanning-tree multicast, so Controller
+    // injects one packet instead of unicasting the same tensor to each PE.
+    void broadcast_input_to_workers(int layer, const vector<float> &payload)
+    {
+        send_packet(make_load_packet(BROADCAST_WORKERS, OP_LOAD_INPUT, layer, payload));
+
+        // The broadcast has no response packet. Wait a small number of cycles
+        // for the tail flit to drain through the 4x4 tree before compute starts.
+        for (int i = 0; i < 64; i++)
+            wait();
+    }
+
     // Build a small convolution compute command.
     // Input/weight/bias data are reused from PE local buffers.
     Packet make_conv_compute(int dest, int job_id,
@@ -366,6 +380,8 @@ SC_MODULE(Controller)
         vector<int> starts;
         vector<int> counts;
 
+        broadcast_input_to_workers(layer, feature);
+
         int base = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_ch; worker++)
         {
@@ -374,7 +390,6 @@ SC_MODULE(Controller)
             vector<float> weight_part = slice_conv_weight(weight, base, oc_count, in_ch, kernel);
             vector<float> bias_part(bias.begin() + base, bias.begin() + base + oc_count);
 
-            send_packet(make_load_packet(worker, OP_LOAD_INPUT, layer, feature));
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
 
@@ -416,12 +431,13 @@ SC_MODULE(Controller)
         vector<int> starts;
         vector<int> counts;
 
+        broadcast_input_to_workers(0, feature);
+
         int base = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < ch; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
             int c_count = (ch - base + remaining_workers - 1) / remaining_workers;
-            send_packet(make_load_packet(worker, OP_LOAD_INPUT, 0, feature));
 
             workers.push_back(worker);
             starts.push_back(base);
@@ -459,6 +475,8 @@ SC_MODULE(Controller)
         vector<int> starts;
         vector<int> counts;
 
+        broadcast_input_to_workers(layer, feature);
+
         int base = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_size; worker++)
         {
@@ -467,7 +485,6 @@ SC_MODULE(Controller)
             vector<float> weight_part = slice_fc_weight(weight, base, o_count, in_size);
             vector<float> bias_part(bias.begin() + base, bias.begin() + base + o_count);
 
-            send_packet(make_load_packet(worker, OP_LOAD_INPUT, layer, feature));
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
 
