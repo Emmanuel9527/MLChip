@@ -280,8 +280,10 @@ SC_MODULE(Controller)
         for (int i = 0; i < expected; i++)
         {
             Packet ack = receive_specific_packet(LOAD_ACK_WORD, expected_source);
+            int ack_op = ack.datas.size() > 1 ? (int)ack.datas[1] : -1;
             debug_log(string("Received ") + label + " ACK from PE " +
-                      num_to_string(ack.source_id) + ".");
+                      num_to_string(ack.source_id) +
+                      ", original op " + num_to_string(ack_op) + ".");
         }
     }
 

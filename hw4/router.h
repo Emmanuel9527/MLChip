@@ -293,7 +293,7 @@ SC_MODULE( Router ) {
 
     bool accept_broadcast_input(int input_port)
     {
-        if (!in_req[input_port].read() || !out_ack[input_port].read())
+        if (!in_req[input_port].read())
             return false;
 
         sc_lv<34> incoming = in_flit[input_port].read();
@@ -440,7 +440,7 @@ SC_MODULE( Router ) {
             return result;
         }
 
-        if (!in_req[input_port].read() || !out_ack[input_port].read())
+        if (!in_req[input_port].read())
             return result;
 
         sc_lv<34> incoming = in_flit[input_port].read();
