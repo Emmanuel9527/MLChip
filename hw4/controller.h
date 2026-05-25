@@ -142,6 +142,7 @@ SC_MODULE(Controller)
             if (ack_tx.read())
             {
                 req_tx.write(false);
+                wait();
                 return;
             }
         }

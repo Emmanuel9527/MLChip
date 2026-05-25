@@ -636,6 +636,9 @@ SC_MODULE( Router ) {
                 if (!out_q[output_port].empty())
                     out_q[output_port].pop();
                 tx_active[output_port] = false;
+                out_req[output_port].write(false);
+                wait();
+                continue;
             }
 
             if (!tx_active[output_port] && !out_q[output_port].empty())

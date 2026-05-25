@@ -55,6 +55,7 @@ SC_MODULE( Core ) {
             if (ack_tx.read())
             {
                 req_tx.write(false);
+                wait();
                 return;
             }
         }
