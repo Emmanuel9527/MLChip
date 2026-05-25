@@ -226,6 +226,14 @@ SC_MODULE(Controller)
         return !packet.datas.empty() && (int)packet.datas[0] == first_word;
     }
 
+    bool packet_is_load_ack_op(const Packet &packet, int expected_source, int expected_op)
+    {
+        return packet.datas.size() > 1 &&
+               (int)packet.datas[0] == LOAD_ACK_WORD &&
+               (int)packet.datas[1] == expected_op &&
+               (expected_source < 0 || packet.source_id == expected_source);
+    }
+
     Packet take_pending_packet(size_t index)
     {
         Packet packet = pending_packets[index];
@@ -290,6 +298,37 @@ SC_MODULE(Controller)
     void wait_for_load_acks(int expected, const string &label)
     {
         wait_for_load_acks(expected, label, -1);
+    }
+
+    void wait_for_load_ack_op(int expected_source, int expected_op, const string &label)
+    {
+        while (true)
+        {
+            for (size_t i = 0; i < pending_packets.size(); i++)
+            {
+                if (packet_is_load_ack_op(pending_packets[i], expected_source, expected_op))
+                {
+                    Packet ack = take_pending_packet(i);
+                    debug_log(string("Received ") + label + " ACK from PE " +
+                              num_to_string(ack.source_id) +
+                              ", original op " + num_to_string((int)ack.datas[1]) + ".");
+                    return;
+                }
+            }
+
+            Packet packet = receive_packet();
+            if (packet_is_load_ack_op(packet, expected_source, expected_op))
+            {
+                debug_log(string("Received ") + label + " ACK from PE " +
+                          num_to_string(packet.source_id) +
+                          ", original op " + num_to_string((int)packet.datas[1]) + ".");
+                return;
+            }
+
+            pending_packets.push_back(packet);
+            debug_log(string("Buffering packet from PE ") + num_to_string(packet.source_id) +
+                      " while waiting for load op " + num_to_string(expected_op) + ".");
+        }
     }
 
     // Initial image padding before conv1.
@@ -492,10 +531,13 @@ SC_MODULE(Controller)
                       ", output channels [" + num_to_string(base) + ", " +
                       num_to_string(base + oc_count - 1) + "].");
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
+            wait_for_load_ack_op(worker, OP_LOAD_WEIGHT,
+                                 string("CONV layer ") + num_to_string(layer) +
+                                 " weight for PE " + num_to_string(worker));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
-            wait_for_load_acks(2, string("CONV layer ") + num_to_string(layer) +
-                               " weight/bias for PE " + num_to_string(worker),
-                               worker);
+            wait_for_load_ack_op(worker, OP_LOAD_BIAS,
+                                 string("CONV layer ") + num_to_string(layer) +
+                                 " bias for PE " + num_to_string(worker));
 
             workers.push_back(worker);
             starts.push_back(base);
@@ -607,10 +649,13 @@ SC_MODULE(Controller)
                       ", output neurons [" + num_to_string(base) + ", " +
                       num_to_string(base + o_count - 1) + "].");
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
+            wait_for_load_ack_op(worker, OP_LOAD_WEIGHT,
+                                 string("FC layer ") + num_to_string(layer) +
+                                 " weight for PE " + num_to_string(worker));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
-            wait_for_load_acks(2, string("FC layer ") + num_to_string(layer) +
-                               " weight/bias for PE " + num_to_string(worker),
-                               worker);
+            wait_for_load_ack_op(worker, OP_LOAD_BIAS,
+                                 string("FC layer ") + num_to_string(layer) +
+                                 " bias for PE " + num_to_string(worker));
 
             workers.push_back(worker);
             starts.push_back(base);

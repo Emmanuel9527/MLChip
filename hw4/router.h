@@ -481,7 +481,14 @@ SC_MODULE( Router ) {
                 continue;
             }
 
-            accept_one_input(input_port);
+            // A transfer is accepted only when VALID is high and this router
+            // had already advertised READY to the sender in the previous cycle.
+            // This avoids consuming the same stable flit twice in SystemC's
+            // posedge/delta-cycle scheduling model.
+            bool ready_seen_by_sender = out_ack[input_port].read();
+            if (in_req[input_port].read() && ready_seen_by_sender)
+                accept_one_input(input_port);
+
             out_ack[input_port].write(ready_for_input(input_port));
             wait();
         }
