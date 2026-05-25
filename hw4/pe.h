@@ -13,14 +13,16 @@ using namespace std;
 // Packet is the transaction format carried by the Core network interface.
 // The router only uses source_id/dest_id in the HEAD flit; operation metadata
 // is encoded at the front of datas by the Controller.
-struct Packet {
+struct Packet
+{
     int source_id;
     int dest_id;
     vector<float> datas;
 };
 
 // Operation codes used by the Controller to select PE actions.
-enum PeOp {
+enum PeOp
+{
     OP_LOAD_INPUT = 1,
     OP_LOAD_WEIGHT = 2,
     OP_LOAD_BIAS = 3,
@@ -30,7 +32,8 @@ enum PeOp {
     OP_LOAD_ACK = 7
 };
 
-SC_MODULE( PE ) {
+SC_MODULE(PE)
+{
     // PE id matches the local router/core id in the 4x4 mesh.
     int id;
 
@@ -87,7 +90,7 @@ SC_MODULE( PE ) {
 
     // Generic load packet:
     // [op, layer_id, payload_size, payload...]
-    void load_buffer(vector<float> &buffer, const Packet &job)
+    void load_buffer(vector<float> & buffer, const Packet &job)
     {
         int payload_size = (int)job.datas[2];
         buffer.assign(job.datas.begin() + 3, job.datas.begin() + 3 + payload_size);
@@ -262,7 +265,7 @@ SC_MODULE( PE ) {
 
     // PE is called by Core when a complete packet arrives; it has no clocked
     // process of its own.
-    SC_HAS_PROCESS( PE );
+    SC_HAS_PROCESS(PE);
     PE(sc_module_name name) : sc_module(name), id(0) {}
 };
 

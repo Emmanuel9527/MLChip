@@ -55,6 +55,7 @@ SC_MODULE(Controller)
     static const int LAST_WORKER = 15;
     static const int WORKER_COUNT = 15;
     static const int BROADCAST_WORKERS = 65535;
+    static const int LOAD_ACK_WORD = 7;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
@@ -235,7 +236,7 @@ SC_MODULE(Controller)
     {
         for (int i = 0; i < expected; i++)
         {
-            Packet ack = receive_specific_packet(OP_LOAD_ACK);
+            Packet ack = receive_specific_packet(LOAD_ACK_WORD);
             debug_log(string("Received ") + label + " ACK from PE " +
                       num_to_string(ack.source_id) + ".");
         }
@@ -466,7 +467,7 @@ SC_MODULE(Controller)
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
-            if (!result.datas.empty() && (int)result.datas[0] == OP_LOAD_ACK)
+            if (!result.datas.empty() && (int)result.datas[0] == LOAD_ACK_WORD)
             {
                 debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
                 i--;
@@ -525,7 +526,7 @@ SC_MODULE(Controller)
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
-            if (!result.datas.empty() && (int)result.datas[0] == OP_LOAD_ACK)
+            if (!result.datas.empty() && (int)result.datas[0] == LOAD_ACK_WORD)
             {
                 debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
                 i--;
@@ -592,7 +593,7 @@ SC_MODULE(Controller)
         for (size_t i = 0; i < workers.size(); i++)
         {
             Packet result = receive_packet();
-            if (!result.datas.empty() && (int)result.datas[0] == OP_LOAD_ACK)
+            if (!result.datas.empty() && (int)result.datas[0] == LOAD_ACK_WORD)
             {
                 debug_log(string("Ignoring late load ACK from PE ") + num_to_string(result.source_id) + ".");
                 i--;
