@@ -147,16 +147,17 @@ SC_MODULE( Router ) {
 
     /*
     VC mapping:
-      VC0 is preferred for Controller -> PE request/load/compute packets.
-      VC1 is preferred for PE -> Controller response packets.
+      VC0 is the deterministic XY escape channel.
+      VC1 is the adaptive minimal-routing channel.
 
-    This mirrors the lecture idea of separating request and response traffic so
-    result packets do not occupy the same virtual channel as command/data flows.
+    This follows the lecture idea of using virtual channels to reduce blocking
+    while keeping one deadlock-free escape path. Adaptive routing is only used
+    on VC1; VC0 always follows XY.
     */
     int preferred_vc_for_header(const sc_lv<34> &flit)
     {
-        int dest = flit_dest_id(flit);
-        return (dest == 0) ? 1 : 0;
+        (void)flit;
+        return 1;
     }
 
     int choose_input_vc(int input_port, const sc_lv<34> &flit)
@@ -174,6 +175,77 @@ SC_MODULE( Router ) {
     int encode_lock(int input_port, int vc)
     {
         return input_port * VC_NUM + vc;
+    }
+
+    int xy_route(int current_id, int dest_id)
+    {
+        int cx = current_id % 4;
+        int cy = current_id / 4;
+        int dx = dest_id % 4;
+        int dy = dest_id / 4;
+
+        if (dx > cx)
+            return EAST;
+        if (dx < cx)
+            return WEST;
+        if (dy > cy)
+            return SOUTH;
+        if (dy < cy)
+            return NORTH;
+        return LOCAL;
+    }
+
+    int output_waiting_time(int out)
+    {
+        int buffer_len = (int)out_q[out].size() + (tx_active[out] ? 1 : 0);
+        int service_time = in_ack[out].read() ? 1 : 4;
+        return service_time * (buffer_len + 1);
+    }
+
+    int adaptive_minimal_route(int current_id, int dest_id)
+    {
+        int cx = current_id % 4;
+        int cy = current_id / 4;
+        int dx = dest_id % 4;
+        int dy = dest_id / 4;
+
+        int x_dir = -1;
+        int y_dir = -1;
+
+        if (dx > cx)
+            x_dir = EAST;
+        else if (dx < cx)
+            x_dir = WEST;
+
+        if (dy > cy)
+            y_dir = SOUTH;
+        else if (dy < cy)
+            y_dir = NORTH;
+
+        if (x_dir == -1 && y_dir == -1)
+            return LOCAL;
+        if (x_dir == -1)
+            return y_dir;
+        if (y_dir == -1)
+            return x_dir;
+
+        int x_wait = output_waiting_time(x_dir);
+        int y_wait = output_waiting_time(y_dir);
+
+        if (!output_has_space(x_dir) && output_has_space(y_dir))
+            return y_dir;
+        if (!output_has_space(y_dir) && output_has_space(x_dir))
+            return x_dir;
+
+        return (y_wait < x_wait) ? y_dir : x_dir;
+    }
+
+    int route_for_vc(const sc_lv<34> &header, int vc)
+    {
+        int dest_id = flit_dest_id(header);
+        if (vc == 0)
+            return xy_route(router_id, dest_id);
+        return adaptive_minimal_route(router_id, dest_id);
     }
 
     // READY generation for one input port. READY depends on buffer capacity,
@@ -286,7 +358,7 @@ SC_MODULE( Router ) {
                         continue;
                     }
 
-                    int target_out = routing_computation(router_id, flit_dest_id(candidate));
+                    int target_out = route_for_vc(candidate, vc);
                     if (target_out != out)
                         continue;
 
