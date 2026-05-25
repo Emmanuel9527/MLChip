@@ -13,6 +13,14 @@
 
 using namespace std;
 
+extern "C" void deadlock_watchdog_wait_edge(int waiter_core,
+                                            int owner_core,
+                                            int router_id,
+                                            int out_port,
+                                            int input_port,
+                                            int vc);
+extern "C" void deadlock_watchdog_clear_waiter(int core_id);
+
 SC_MODULE( Router ) {
     /*
     HW4 NoC router model.
@@ -82,6 +90,7 @@ SC_MODULE( Router ) {
     // Packet-level allocation state.
     int vc_state[PORT_NUM][VC_NUM];
     int out_port_lock[PORT_NUM];
+    int out_lock_source[PORT_NUM];
     int output_rr_start[PORT_NUM];
     int rx_current_vc[PORT_NUM];
     bool broadcast_active[PORT_NUM];
@@ -103,6 +112,11 @@ SC_MODULE( Router ) {
     int flit_dest_id(const sc_lv<34> &flit)
     {
         return flit.range(31, 16).to_uint();
+    }
+
+    int flit_source_id(const sc_lv<34> &flit)
+    {
+        return flit.range(15, 0).to_uint();
     }
 
     bool is_broadcast_flit(const sc_lv<34> &flit)
@@ -261,17 +275,29 @@ SC_MODULE( Router ) {
     void allocate_broadcast_outputs(int input_port)
     {
         int lock_id = encode_broadcast_lock(input_port);
+        int source_id = flit_source_id(in_flit[input_port].read());
         for (int out = 0; out < PORT_NUM; out++)
+        {
             if (broadcast_mask[input_port][out])
+            {
                 out_port_lock[out] = lock_id;
+                out_lock_source[out] = source_id;
+            }
+        }
     }
 
     void release_broadcast_outputs(int input_port)
     {
         int lock_id = encode_broadcast_lock(input_port);
         for (int out = 0; out < PORT_NUM; out++)
+        {
             if (out_port_lock[out] == lock_id)
+            {
+                deadlock_watchdog_clear_waiter(out_lock_source[out]);
                 out_port_lock[out] = -1;
+                out_lock_source[out] = -1;
+            }
+        }
     }
 
     bool ready_for_broadcast_input(int input_port)
@@ -494,11 +520,12 @@ SC_MODULE( Router ) {
         }
     }
 
-    bool can_allocate_output(int out, int input_port, int vc)
+    bool can_allocate_output(int out, int input_port, int vc, int source_id)
     {
         if (out_port_lock[out] == -1)
         {
             out_port_lock[out] = encode_lock(input_port, vc);
+            out_lock_source[out] = source_id;
             vc_state[input_port][vc] = out;
             return true;
         }
@@ -540,8 +567,17 @@ SC_MODULE( Router ) {
                     if (target_out != out)
                         continue;
 
-                    if (!can_allocate_output(out, input_port, vc))
+                    int waiter_source = flit_source_id(candidate);
+                    if (!can_allocate_output(out, input_port, vc, waiter_source))
+                    {
+                        deadlock_watchdog_wait_edge(waiter_source,
+                                                    out_lock_source[out],
+                                                    router_id,
+                                                    out,
+                                                    input_port,
+                                                    vc);
                         continue;
+                    }
                 }
 
                 if (vc_state[input_port][vc] == out &&
@@ -565,6 +601,8 @@ SC_MODULE( Router ) {
 
         sc_lv<34> flit = in_q[grant.input_port][grant.vc].front();
         int type = flit_type(flit);
+        int owner_source = out_lock_source[out];
+        deadlock_watchdog_clear_waiter(owner_source);
 
         out_q[out].push(flit);
         in_q[grant.input_port][grant.vc].pop();
@@ -574,6 +612,7 @@ SC_MODULE( Router ) {
         if (type == TAIL_FLIT)
         {
             out_port_lock[out] = -1;
+            out_lock_source[out] = -1;
             vc_state[grant.input_port][grant.vc] = -1;
         }
     }
@@ -583,6 +622,7 @@ SC_MODULE( Router ) {
         for (int p = 0; p < PORT_NUM; p++)
         {
             out_port_lock[p] = -1;
+            out_lock_source[p] = -1;
             output_rr_start[p] = 0;
             broadcast_active[p] = false;
             clear_broadcast_mask(p);
@@ -691,6 +731,7 @@ SC_MODULE( Router ) {
         for (int p = 0; p < PORT_NUM; p++)
         {
             out_port_lock[p] = -1;
+            out_lock_source[p] = -1;
             output_rr_start[p] = 0;
             rx_current_vc[p] = -1;
             broadcast_active[p] = false;

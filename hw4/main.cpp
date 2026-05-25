@@ -6,8 +6,12 @@
 #include "systemc.h"
 #include <cstdio>
 
+extern "C" void deadlock_watchdog_clear();
+
 int sc_main(int argc, char* argv[])
 {
+    deadlock_watchdog_clear();
+
     // Global clock and active-high reset used by all modules.
     sc_signal < bool > clk;
     sc_signal < bool > rst;

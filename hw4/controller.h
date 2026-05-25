@@ -56,15 +56,22 @@ SC_MODULE(Controller)
     static const int WORKER_COUNT = 15;
     static const int BROADCAST_WORKERS = 65535;
     static const int LOAD_ACK_WORD = 7;
+    static const int DEADLOCK_WATCHDOG_CYCLES = 200000;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
     vector<Packet> pending_packets;
+    string wait_context;
 
     void debug_log(const string &msg)
     {
         if (DEBUG_PROGRESS)
             cout << "[DEBUG] " << msg << endl;
+    }
+
+    void set_wait_context(const string &context)
+    {
+        wait_context = context;
     }
 
     template <typename T>
@@ -181,6 +188,8 @@ SC_MODULE(Controller)
     {
         Packet packet;
         bool active = false;
+        int idle_cycles = 0;
+        int packet_flits = 0;
 
         while (true)
         {
@@ -188,8 +197,19 @@ SC_MODULE(Controller)
             wait();
 
             if (!req_rx.read())
+            {
+                idle_cycles++;
+                if (idle_cycles == DEADLOCK_WATCHDOG_CYCLES)
+                {
+                    debug_log(string("Deadlock watchdog: no flit at Controller for ") +
+                              num_to_string(DEADLOCK_WATCHDOG_CYCLES) +
+                              " cycles while waiting for " + wait_context + ".");
+                    idle_cycles = 0;
+                }
                 continue;
+            }
 
+            idle_cycles = 0;
             sc_lv<34> flit = flit_rx.read();
             int type = flit.range(33, 32).to_uint();
 
@@ -200,6 +220,7 @@ SC_MODULE(Controller)
                 packet.dest_id = flit.range(31, 16).to_uint();
                 packet.source_id = flit.range(15, 0).to_uint();
                 active = true;
+                packet_flits = 1;
             }
             else if (active && (type == 0 || type == 1))
             {
@@ -212,11 +233,19 @@ SC_MODULE(Controller)
 
                 converter.ival = flit.range(31, 0).to_uint();
                 packet.datas.push_back(converter.fval);
+                packet_flits++;
 
                 if (type == 1)
                 {
                     return packet;
                 }
+            }
+            else
+            {
+                debug_log(string("Deadlock watchdog: unexpected flit type ") +
+                          num_to_string(type) + " while waiting for " +
+                          wait_context + ", active=" + num_to_string(active) +
+                          ", packet flits=" + num_to_string(packet_flits) + ".");
             }
         }
     }
@@ -302,6 +331,7 @@ SC_MODULE(Controller)
 
     void wait_for_load_ack_op(int expected_source, int expected_op, const string &label)
     {
+        set_wait_context(label + " ACK");
         while (true)
         {
             for (size_t i = 0; i < pending_packets.size(); i++)
@@ -329,6 +359,28 @@ SC_MODULE(Controller)
             debug_log(string("Buffering packet from PE ") + num_to_string(packet.source_id) +
                       " while waiting for load op " + num_to_string(expected_op) + ".");
         }
+    }
+
+    string missing_workers_string(const vector<int> &workers, const vector<bool> &received)
+    {
+        string text;
+        for (size_t i = 0; i < workers.size(); i++)
+        {
+            if (received[i])
+                continue;
+            if (!text.empty())
+                text += ",";
+            text += num_to_string(workers[i]);
+        }
+        return text.empty() ? string("none") : text;
+    }
+
+    int worker_index(const vector<int> &workers, int source_id)
+    {
+        for (size_t i = 0; i < workers.size(); i++)
+            if (workers[i] == source_id)
+                return (int)i;
+        return -1;
     }
 
     // Initial image padding before conv1.
@@ -556,10 +608,30 @@ SC_MODULE(Controller)
             send_packet(packet);
         }
 
-        for (size_t i = 0; i < workers.size(); i++)
+        vector<bool> received(workers.size(), false);
+        int received_count = 0;
+        while (received_count < (int)workers.size())
         {
+            set_wait_context(string("CONV layer ") + num_to_string(layer) +
+                             " result, missing PEs [" +
+                             missing_workers_string(workers, received) + "]");
             Packet result = receive_compute_result();
             debug_log(string("Received CONV result from PE ") + num_to_string(result.source_id) + ".");
+            int index = worker_index(workers, result.source_id);
+            if (index < 0)
+            {
+                debug_log(string("Deadlock watchdog: unexpected CONV result source PE ") +
+                          num_to_string(result.source_id) + ".");
+                continue;
+            }
+            if (received[index])
+            {
+                debug_log(string("Deadlock watchdog: duplicate CONV result from PE ") +
+                          num_to_string(result.source_id) + ".");
+                continue;
+            }
+            received[index] = true;
+            received_count++;
             merge_channel_result(output, result);
         }
 
@@ -609,10 +681,29 @@ SC_MODULE(Controller)
             send_packet(packet);
         }
 
-        for (size_t i = 0; i < workers.size(); i++)
+        vector<bool> received(workers.size(), false);
+        int received_count = 0;
+        while (received_count < (int)workers.size())
         {
+            set_wait_context(string("POOL result, missing PEs [") +
+                             missing_workers_string(workers, received) + "]");
             Packet result = receive_compute_result();
             debug_log(string("Received POOL result from PE ") + num_to_string(result.source_id) + ".");
+            int index = worker_index(workers, result.source_id);
+            if (index < 0)
+            {
+                debug_log(string("Deadlock watchdog: unexpected POOL result source PE ") +
+                          num_to_string(result.source_id) + ".");
+                continue;
+            }
+            if (received[index])
+            {
+                debug_log(string("Deadlock watchdog: duplicate POOL result from PE ") +
+                          num_to_string(result.source_id) + ".");
+                continue;
+            }
+            received[index] = true;
+            received_count++;
             merge_channel_result(output, result);
         }
 
@@ -673,10 +764,30 @@ SC_MODULE(Controller)
             send_packet(packet);
         }
 
-        for (size_t i = 0; i < workers.size(); i++)
+        vector<bool> received(workers.size(), false);
+        int received_count = 0;
+        while (received_count < (int)workers.size())
         {
+            set_wait_context(string("FC layer ") + num_to_string(layer) +
+                             " result, missing PEs [" +
+                             missing_workers_string(workers, received) + "]");
             Packet result = receive_compute_result();
             debug_log(string("Received FC result from PE ") + num_to_string(result.source_id) + ".");
+            int index = worker_index(workers, result.source_id);
+            if (index < 0)
+            {
+                debug_log(string("Deadlock watchdog: unexpected FC result source PE ") +
+                          num_to_string(result.source_id) + ".");
+                continue;
+            }
+            if (received[index])
+            {
+                debug_log(string("Deadlock watchdog: duplicate FC result from PE ") +
+                          num_to_string(result.source_id) + ".");
+                continue;
+            }
+            received[index] = true;
+            received_count++;
             int p = 0;
             int result_job_id = (int)result.datas[p++];
             int start = (int)result.datas[p++];
