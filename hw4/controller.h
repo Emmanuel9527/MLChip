@@ -195,6 +195,7 @@ SC_MODULE(Controller)
         int idle_reports = 0;
         int packet_flits = 0;
         int unexpected_flits = 0;
+        bool req_seen = false;
 
         while (true)
         {
@@ -203,6 +204,7 @@ SC_MODULE(Controller)
 
             if (!req_rx.read())
             {
+                req_seen = false;
                 idle_cycles++;
                 if (idle_cycles == DEADLOCK_WATCHDOG_CYCLES)
                 {
@@ -219,6 +221,9 @@ SC_MODULE(Controller)
                 continue;
             }
 
+            if (req_seen)
+                continue;
+            req_seen = true;
             idle_cycles = 0;
             idle_reports = 0;
             sc_lv<34> flit = flit_rx.read();

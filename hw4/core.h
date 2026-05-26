@@ -157,6 +157,7 @@ SC_MODULE( Core ) {
     {
         Packet packet;
         bool packet_active = false;
+        bool req_seen = false;
 
         while (true)
         {
@@ -164,6 +165,7 @@ SC_MODULE( Core ) {
             {
                 packet = Packet();
                 packet_active = false;
+                req_seen = false;
                 ack_rx.write(false);
                 wait();
                 continue;
@@ -171,8 +173,15 @@ SC_MODULE( Core ) {
 
             ack_rx.write(true);
 
-            if (req_rx.read())
+            if (!req_rx.read())
+            {
+                req_seen = false;
+            }
+            else if (!req_seen)
+            {
+                req_seen = true;
                 receive_flit(flit_rx.read(), packet, packet_active);
+            }
 
             wait();
         }
