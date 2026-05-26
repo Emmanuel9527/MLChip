@@ -83,6 +83,11 @@ SC_MODULE(Controller)
         wait_context = context;
     }
 
+    void set_rx_ready(bool ready)
+    {
+        ack_rx.write(ready);
+    }
+
     template <typename T>
     string num_to_string(T value)
     {
@@ -205,7 +210,7 @@ SC_MODULE(Controller)
 
         while (true)
         {
-            ack_rx.write(true);
+            set_rx_ready(true);
             wait();
 
             if (!req_rx.read())
@@ -259,6 +264,7 @@ SC_MODULE(Controller)
 
                 if (type == 1)
                 {
+                    set_rx_ready(false);
                     return packet;
                 }
             }
@@ -916,7 +922,7 @@ SC_MODULE(Controller)
         layer_id_type.write(false);
         layer_id_valid.write(false);
         req_tx.write(false);
-        ack_rx.write(true);
+        set_rx_ready(false);
         flit_tx.write(0);
 
         wait();
