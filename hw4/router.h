@@ -408,19 +408,17 @@ SC_MODULE( Router ) {
 
     bool ready_for_broadcast_input(int input_port)
     {
+        if (broadcast_active[input_port])
+            return broadcast_outputs_have_space(input_port);
+
         if (!in_req[input_port].read())
             return true;
 
         sc_lv<34> incoming = in_flit[input_port].read();
-        if (!broadcast_active[input_port])
-        {
-            if (flit_type(incoming) != HEAD_FLIT || !is_broadcast_flit(incoming))
-                return false;
-            build_broadcast_mask(input_port);
-            return broadcast_outputs_can_allocate(input_port);
-        }
-
-        return broadcast_outputs_have_space(input_port);
+        if (flit_type(incoming) != HEAD_FLIT || !is_broadcast_flit(incoming))
+            return false;
+        build_broadcast_mask(input_port);
+        return broadcast_outputs_can_allocate(input_port);
     }
 
     bool accept_broadcast_input(int input_port)
@@ -540,6 +538,9 @@ SC_MODULE( Router ) {
         if (broadcast_active[input_port])
             return ready_for_broadcast_input(input_port);
 
+        if (rx_current_vc[input_port] != -1)
+            return eb_has_space(input_port, rx_current_vc[input_port]);
+
         if (!in_req[input_port].read())
             return any_vc_has_space(input_port);
 
@@ -551,9 +552,6 @@ SC_MODULE( Router ) {
 
         if (type == HEAD_FLIT)
             return choose_input_vc(input_port, incoming) != -1;
-
-        if (rx_current_vc[input_port] != -1)
-            return eb_has_space(input_port, rx_current_vc[input_port]);
 
         return false;
     }
