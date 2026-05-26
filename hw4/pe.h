@@ -137,6 +137,14 @@ SC_MODULE(PE)
         int oc_start = (int)d[p++];
         int oc_count = (int)d[p++];
 
+        cout << "[PE_DEBUG] PE " << id
+             << " start CONV job " << job_id
+             << ", oc_start=" << oc_start
+             << ", oc_count=" << oc_count
+             << ", input_values=" << input_buf.size()
+             << ", weight_values=" << weight_buf.size()
+             << ", bias_values=" << bias_buf.size() << "." << endl;
+
         int out_h = (in_h - kernel) / stride + 1;
         int out_w = (in_w - kernel) / stride + 1;
         Packet *result = make_result(job, job_id);
@@ -176,6 +184,10 @@ SC_MODULE(PE)
         }
 
         (void)out_ch;
+        cout << "[PE_DEBUG] PE " << id
+             << " finish CONV job " << job_id
+             << ", result_payload_size=" << result->datas.size()
+             << "." << endl;
         return result;
     }
 

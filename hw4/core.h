@@ -36,6 +36,13 @@ SC_MODULE( Core ) {
         pe.init(core_id);
     }
 
+    int packet_first_word(Packet *packet)
+    {
+        if (packet == NULL || packet->datas.empty())
+            return -1;
+        return (int)packet->datas[0];
+    }
+
     // Send one flit using the valid-ready protocol.
     void send_flit(const sc_lv<34> &flit)
     {
@@ -85,6 +92,10 @@ SC_MODULE( Core ) {
 
             Packet *packet = tx_packets.front();
             tx_packets.pop();
+            cout << "[CORE_TX] PE " << id
+                 << " start send packet to " << packet->dest_id
+                 << ", first_word=" << packet_first_word(packet)
+                 << ", payload_size=" << packet->datas.size() << "." << endl;
 
             // HEAD flit layout: type, destination id, source id.
             sc_lv<34> header;
@@ -110,6 +121,8 @@ SC_MODULE( Core ) {
             }
 
             delete packet;
+            cout << "[CORE_TX] PE " << id
+                 << " finished sending packet." << endl;
         }
     }
 
@@ -143,9 +156,29 @@ SC_MODULE( Core ) {
         if (type == 1)
         {
             // TAIL completes the packet. Run PE computation and enqueue result.
+            if (!packet.datas.empty())
+            {
+                int op = (int)packet.datas[0];
+                cout << "[CORE_RX] PE " << id
+                     << " received packet from " << packet.source_id
+                     << ", op=" << op;
+                if ((op == OP_COMPUTE_CONV ||
+                     op == OP_COMPUTE_POOL ||
+                     op == OP_COMPUTE_FC) &&
+                    packet.datas.size() > 1)
+                    cout << ", job=" << (int)packet.datas[1];
+                cout << ", payload_size=" << packet.datas.size() << "." << endl;
+            }
+
             Packet *result = pe.process_packet(packet);
             if (result != NULL)
+            {
+                cout << "[CORE_RX] PE " << id
+                     << " queued result packet, first_word="
+                     << packet_first_word(result)
+                     << ", payload_size=" << result->datas.size() << "." << endl;
                 tx_packets.push(result);
+            }
             packet = Packet();
             packet_active = false;
         }
