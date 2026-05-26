@@ -57,6 +57,9 @@ SC_MODULE(Controller)
     static const int BROADCAST_WORKERS = 65535;
     static const int LOAD_ACK_WORD = 7;
     static const int DEADLOCK_WATCHDOG_CYCLES = 200000;
+    static const int WATCHDOG_IDLE_LOG_INTERVALS = 10;
+    static const int UNEXPECTED_FLIT_LOG_LIMIT = 5;
+    static const int UNEXPECTED_FLIT_LOG_INTERVAL = 1000;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
@@ -189,7 +192,9 @@ SC_MODULE(Controller)
         Packet packet;
         bool active = false;
         int idle_cycles = 0;
+        int idle_reports = 0;
         int packet_flits = 0;
+        int unexpected_flits = 0;
 
         while (true)
         {
@@ -201,15 +206,21 @@ SC_MODULE(Controller)
                 idle_cycles++;
                 if (idle_cycles == DEADLOCK_WATCHDOG_CYCLES)
                 {
-                    debug_log(string("Deadlock watchdog: no flit at Controller for ") +
-                              num_to_string(DEADLOCK_WATCHDOG_CYCLES) +
-                              " cycles while waiting for " + wait_context + ".");
+                    idle_reports++;
+                    if (idle_reports == 1 ||
+                        idle_reports % WATCHDOG_IDLE_LOG_INTERVALS == 0)
+                    {
+                        debug_log(string("Deadlock watchdog: no flit at Controller for ") +
+                                  num_to_string(DEADLOCK_WATCHDOG_CYCLES * idle_reports) +
+                                  " cycles while waiting for " + wait_context + ".");
+                    }
                     idle_cycles = 0;
                 }
                 continue;
             }
 
             idle_cycles = 0;
+            idle_reports = 0;
             sc_lv<34> flit = flit_rx.read();
             int type = flit.range(33, 32).to_uint();
 
@@ -242,10 +253,18 @@ SC_MODULE(Controller)
             }
             else
             {
-                debug_log(string("Deadlock watchdog: unexpected flit type ") +
-                          num_to_string(type) + " while waiting for " +
-                          wait_context + ", active=" + num_to_string(active) +
-                          ", packet flits=" + num_to_string(packet_flits) + ".");
+                unexpected_flits++;
+                if (unexpected_flits <= UNEXPECTED_FLIT_LOG_LIMIT ||
+                    unexpected_flits % UNEXPECTED_FLIT_LOG_INTERVAL == 0)
+                {
+                    debug_log(string("Deadlock watchdog: unexpected flit type ") +
+                              num_to_string(type) + " while waiting for " +
+                              wait_context + ", active=" + num_to_string(active) +
+                              ", packet flits=" + num_to_string(packet_flits) +
+                              ", suppressed similar flits=" +
+                              num_to_string(max(0, unexpected_flits - UNEXPECTED_FLIT_LOG_LIMIT)) +
+                              ".");
+                }
             }
         }
     }
