@@ -66,6 +66,7 @@ SC_MODULE(Controller)
     static const int WATCHDOG_IDLE_LOG_INTERVALS = 10;
     static const int UNEXPECTED_FLIT_LOG_LIMIT = 5;
     static const int UNEXPECTED_FLIT_LOG_INTERVAL = 1000;
+    static const int ROM_PROGRESS_INTERVAL = 1000000;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
@@ -132,6 +133,15 @@ SC_MODULE(Controller)
             {
                 started = true;
                 values.push_back(data.read());
+                if (expected >= ROM_PROGRESS_INTERVAL &&
+                    (int)values.size() % ROM_PROGRESS_INTERVAL == 0)
+                {
+                    debug_log(string("ROM read progress: layer ") +
+                              num_to_string(id) +
+                              (type ? " bias, " : " weight/image, ") +
+                              num_to_string(values.size()) + "/" +
+                              num_to_string(expected) + " values.");
+                }
             }
             else if (started)
             {
