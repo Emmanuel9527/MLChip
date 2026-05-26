@@ -34,6 +34,8 @@ enum PeOp
 
 SC_MODULE(PE)
 {
+    static const int MACS_PER_CYCLE = 1024;
+
     // PE id matches the local router/core id in the 4x4 mesh.
     int id;
 
@@ -47,6 +49,13 @@ SC_MODULE(PE)
     static int idx3(int c, int h, int w, int height, int width)
     {
         return c * height * width + h * width + w;
+    }
+
+    void wait_for_macs(long long mac_count)
+    {
+        long long cycles = (mac_count + MACS_PER_CYCLE - 1) / MACS_PER_CYCLE;
+        for (long long i = 0; i < cycles; i++)
+            wait();
     }
 
     // Called by main.cpp after construction so this PE knows its mesh id.
@@ -147,6 +156,15 @@ SC_MODULE(PE)
 
         int out_h = (in_h - kernel) / stride + 1;
         int out_w = (in_w - kernel) / stride + 1;
+        long long mac_count = (long long)oc_count * out_h * out_w *
+                              in_ch * kernel * kernel;
+        cout << "[PE_DEBUG] PE " << id
+             << " CONV job " << job_id
+             << " compute latency cycles="
+             << ((mac_count + MACS_PER_CYCLE - 1) / MACS_PER_CYCLE)
+             << " for macs=" << mac_count << "." << endl;
+        wait_for_macs(mac_count);
+
         Packet *result = make_result(job, job_id);
         result->datas.push_back((float)oc_start);
         result->datas.push_back((float)oc_count);
@@ -253,6 +271,14 @@ SC_MODULE(PE)
         int out_size = (int)d[p++];
         int o_start = (int)d[p++];
         int o_count = (int)d[p++];
+
+        long long mac_count = (long long)o_count * in_size;
+        cout << "[PE_DEBUG] PE " << id
+             << " FC job " << job_id
+             << " compute latency cycles="
+             << ((mac_count + MACS_PER_CYCLE - 1) / MACS_PER_CYCLE)
+             << " for macs=" << mac_count << "." << endl;
+        wait_for_macs(mac_count);
 
         Packet *result = make_result(job, job_id);
         result->datas.push_back((float)o_start);
