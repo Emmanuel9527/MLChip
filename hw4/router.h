@@ -135,6 +135,25 @@ SC_MODULE( Router ) {
         return flit.range(15, 0).to_uint();
     }
 
+    const char *port_name(int port)
+    {
+        switch (port)
+        {
+        case NORTH:
+            return "NORTH";
+        case SOUTH:
+            return "SOUTH";
+        case EAST:
+            return "EAST";
+        case WEST:
+            return "WEST";
+        case LOCAL:
+            return "LOCAL";
+        default:
+            return "UNKNOWN";
+        }
+    }
+
     bool is_broadcast_flit(const sc_lv<34> &flit)
     {
         return flit_dest_id(flit) == BROADCAST_ID;
@@ -704,6 +723,19 @@ SC_MODULE( Router ) {
                 int type = flit_type(tx_buffer[output_port]);
                 int dest_id = (type == HEAD_FLIT) ? flit_dest_id(tx_buffer[output_port]) : -1;
                 int source_id = (type == HEAD_FLIT) ? flit_source_id(tx_buffer[output_port]) : -1;
+                if (type == HEAD_FLIT)
+                {
+                    cout << "[ROUTER_PKT] router " << router_id
+                         << " output " << port_name(output_port)
+                         << " HEAD dest=" << dest_id
+                         << " source=" << source_id << "." << endl;
+                }
+                else if (type == TAIL_FLIT)
+                {
+                    cout << "[ROUTER_PKT] router " << router_id
+                         << " output " << port_name(output_port)
+                         << " TAIL." << endl;
+                }
                 deadlock_watchdog_note_flit_transfer(router_id,
                                                      output_port,
                                                      type,
