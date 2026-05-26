@@ -111,6 +111,15 @@ SC_MODULE( Router ) {
     int rx_current_vc[PORT_NUM];
     bool broadcast_active[PORT_NUM];
     bool broadcast_mask[PORT_NUM][PORT_NUM];
+    bool dbg_in_packet_active[PORT_NUM];
+    int dbg_in_packet_source[PORT_NUM];
+    int dbg_in_packet_dest[PORT_NUM];
+    int dbg_in_packet_flits[PORT_NUM];
+    bool dbg_out_packet_active[PORT_NUM];
+    int dbg_out_packet_source[PORT_NUM];
+    int dbg_out_packet_dest[PORT_NUM];
+    int dbg_out_packet_flits[PORT_NUM];
+    int dbg_out_packet_idle_cycles[PORT_NUM];
 
     // main.cpp assigns this router's mesh node id after construction.
     void init(int id)
@@ -157,6 +166,66 @@ SC_MODULE( Router ) {
     bool is_broadcast_flit(const sc_lv<34> &flit)
     {
         return flit_dest_id(flit) == BROADCAST_ID;
+    }
+
+    void debug_note_input_accept(int input_port, const sc_lv<34> &flit)
+    {
+        int type = flit_type(flit);
+
+        if (type == HEAD_FLIT)
+        {
+            dbg_in_packet_active[input_port] = true;
+            dbg_in_packet_source[input_port] = flit_source_id(flit);
+            dbg_in_packet_dest[input_port] = flit_dest_id(flit);
+            dbg_in_packet_flits[input_port] = 1;
+            return;
+        }
+
+        if (!dbg_in_packet_active[input_port])
+            return;
+
+        dbg_in_packet_flits[input_port]++;
+        if (type == TAIL_FLIT)
+        {
+            cout << "[ROUTER_IN] router " << router_id
+                 << " input " << port_name(input_port)
+                 << " accepted packet dest=" << dbg_in_packet_dest[input_port]
+                 << " source=" << dbg_in_packet_source[input_port]
+                 << ", flits=" << dbg_in_packet_flits[input_port]
+                 << "." << endl;
+            dbg_in_packet_active[input_port] = false;
+        }
+    }
+
+    void debug_note_output_transfer(int output_port, const sc_lv<34> &flit)
+    {
+        int type = flit_type(flit);
+
+        if (type == HEAD_FLIT)
+        {
+            dbg_out_packet_active[output_port] = true;
+            dbg_out_packet_source[output_port] = flit_source_id(flit);
+            dbg_out_packet_dest[output_port] = flit_dest_id(flit);
+            dbg_out_packet_flits[output_port] = 1;
+            dbg_out_packet_idle_cycles[output_port] = 0;
+            return;
+        }
+
+        if (!dbg_out_packet_active[output_port])
+            return;
+
+        dbg_out_packet_flits[output_port]++;
+        dbg_out_packet_idle_cycles[output_port] = 0;
+        if (type == TAIL_FLIT)
+        {
+            cout << "[ROUTER_OUT] router " << router_id
+                 << " output " << port_name(output_port)
+                 << " sent packet dest=" << dbg_out_packet_dest[output_port]
+                 << " source=" << dbg_out_packet_source[output_port]
+                 << ", flits=" << dbg_out_packet_flits[output_port]
+                 << "." << endl;
+            dbg_out_packet_active[output_port] = false;
+        }
     }
 
     // Deterministic XY routing for a 4x4 mesh.
@@ -523,6 +592,7 @@ SC_MODULE( Router ) {
             rx_current_vc[input_port] = vc;
 
         in_q[input_port][vc].push(incoming);
+        debug_note_input_accept(input_port, incoming);
         result.accepted = true;
         result.flit_type = type;
 
@@ -665,6 +735,15 @@ SC_MODULE( Router ) {
             out_lock_source[p] = -1;
             output_rr_start[p] = 0;
             broadcast_active[p] = false;
+            dbg_in_packet_active[p] = false;
+            dbg_in_packet_source[p] = -1;
+            dbg_in_packet_dest[p] = -1;
+            dbg_in_packet_flits[p] = 0;
+            dbg_out_packet_active[p] = false;
+            dbg_out_packet_source[p] = -1;
+            dbg_out_packet_dest[p] = -1;
+            dbg_out_packet_flits[p] = 0;
+            dbg_out_packet_idle_cycles[p] = 0;
             clear_broadcast_mask(p);
             clear_queue(out_q[p]);
 
@@ -736,6 +815,7 @@ SC_MODULE( Router ) {
                          << " output " << port_name(output_port)
                          << " TAIL." << endl;
                 }
+                debug_note_output_transfer(output_port, tx_buffer[output_port]);
                 deadlock_watchdog_note_flit_transfer(router_id,
                                                      output_port,
                                                      type,
@@ -748,6 +828,25 @@ SC_MODULE( Router ) {
                 out_req[output_port].write(false);
                 wait();
                 continue;
+            }
+
+            if (dbg_out_packet_active[output_port] &&
+                !tx_active[output_port] &&
+                out_q[output_port].empty())
+            {
+                dbg_out_packet_idle_cycles[output_port]++;
+                if (dbg_out_packet_idle_cycles[output_port] == 50000 ||
+                    dbg_out_packet_idle_cycles[output_port] % 200000 == 0)
+                {
+                    cout << "[ROUTER_STUCK] router " << router_id
+                         << " output " << port_name(output_port)
+                         << " waiting for rest of packet dest="
+                         << dbg_out_packet_dest[output_port]
+                         << " source=" << dbg_out_packet_source[output_port]
+                         << ", flits_sent=" << dbg_out_packet_flits[output_port]
+                         << ", idle_cycles=" << dbg_out_packet_idle_cycles[output_port]
+                         << "." << endl;
+                }
             }
 
             if (!tx_active[output_port] && !out_q[output_port].empty())
@@ -797,6 +896,15 @@ SC_MODULE( Router ) {
             output_rr_start[p] = 0;
             rx_current_vc[p] = -1;
             broadcast_active[p] = false;
+            dbg_in_packet_active[p] = false;
+            dbg_in_packet_source[p] = -1;
+            dbg_in_packet_dest[p] = -1;
+            dbg_in_packet_flits[p] = 0;
+            dbg_out_packet_active[p] = false;
+            dbg_out_packet_source[p] = -1;
+            dbg_out_packet_dest[p] = -1;
+            dbg_out_packet_flits[p] = 0;
+            dbg_out_packet_idle_cycles[p] = 0;
             tx_active[p] = false;
             tx_buffer[p] = zero_flit;
             out_req[p].initialize(false);
