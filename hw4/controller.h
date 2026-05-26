@@ -1,6 +1,7 @@
 #ifndef CONTROLLER_H
 #define CONTROLLER_H
 
+#include "noc.h"
 #include "pe.h"
 #include "systemc.h"
 #include <algorithm>
@@ -40,11 +41,11 @@ SC_MODULE(Controller)
 
     // Local NoC interface. The controller is connected to router 0 as the
     // master node; PE workers are connected to routers 1 through 15.
-    sc_out<sc_lv<34>> flit_tx;
+    sc_out<Flit> flit_tx;
     sc_out<bool> req_tx;
     sc_in<bool> ack_tx;
 
-    sc_in<sc_lv<34>> flit_rx;
+    sc_in<Flit> flit_rx;
     sc_in<bool> req_rx;
     sc_out<bool> ack_rx;
 
@@ -67,6 +68,7 @@ SC_MODULE(Controller)
     static const int UNEXPECTED_FLIT_LOG_LIMIT = 5;
     static const int UNEXPECTED_FLIT_LOG_INTERVAL = 1000;
     static const int ROM_PROGRESS_INTERVAL = 1000000;
+    static const int PACKET_PROGRESS_FLITS = 50000;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
@@ -162,7 +164,7 @@ SC_MODULE(Controller)
     }
 
     // Send one flit into router[0] using valid-ready handshake.
-    void send_flit(const sc_lv<34> &flit)
+    void send_flit(const Flit &flit)
     {
         while (true)
         {
@@ -182,28 +184,65 @@ SC_MODULE(Controller)
     // Serialize a packet into one HEAD flit and payload BODY/TAIL flits.
     void send_packet(const Packet &packet)
     {
-        // HEAD flit layout: type=2, destination id, source id.
-        sc_lv<34> header;
-        header.range(33, 32) = 2;
-        header.range(31, 16) = packet.dest_id;
-        header.range(15, 0) = packet.source_id;
+        int payload_flits =
+            (packet.datas.size() + PACKED_FLIT_WORDS - 1) / PACKED_FLIT_WORDS;
+        bool report_progress = payload_flits >= PACKET_PROGRESS_FLITS;
+        int sent_payload_flits = 0;
+
+        if (report_progress)
+        {
+            int op = packet.datas.empty() ? -1 : (int)packet.datas[0];
+            debug_log(string("Sending large packet to PE ") +
+                      num_to_string(packet.dest_id) +
+                      ", op=" + num_to_string(op) +
+                      ", payload_words=" + num_to_string(packet.datas.size()) +
+                      ", packed_flits=" + num_to_string(payload_flits) + ".");
+        }
+
+        // HEAD flit layout: type=HEAD, destination id, source id.
+        Flit header;
+        header = 0;
+        set_flit_type(header, NOC_HEAD_FLIT);
+        set_flit_count(header, 0);
+        set_header_fields(header, packet.dest_id, packet.source_id);
         send_flit(header);
 
-        for (size_t i = 0; i < packet.datas.size(); i++)
+        for (size_t i = 0; i < packet.datas.size();)
         {
-            // Payload flit layout: type in [33:32], raw float bits in [31:0].
-            sc_lv<34> flit;
-            flit.range(33, 32) = (i == packet.datas.size() - 1) ? 1 : 0;
+            int count = (int)min((size_t)PACKED_FLIT_WORDS,
+                                 packet.datas.size() - i);
+            bool last = (i + count == packet.datas.size());
 
-            union
+            Flit flit;
+            flit = 0;
+            set_flit_type(flit, last ? NOC_TAIL_FLIT : NOC_BODY_FLIT);
+            set_flit_count(flit, count);
+
+            for (int lane = 0; lane < count; lane++)
             {
-                float fval;
-                unsigned int ival;
-            } converter;
+                union
+                {
+                    float fval;
+                    unsigned int ival;
+                } converter;
 
-            converter.fval = packet.datas[i];
-            flit.range(31, 0) = converter.ival;
+                converter.fval = packet.datas[i + lane];
+                set_flit_word(flit, lane, converter.ival);
+            }
             send_flit(flit);
+            i += count;
+            sent_payload_flits++;
+
+            if (report_progress &&
+                (sent_payload_flits % PACKET_PROGRESS_FLITS == 0 ||
+                 sent_payload_flits == payload_flits))
+            {
+                debug_log(string("Packet send progress to PE ") +
+                          num_to_string(packet.dest_id) + ": " +
+                          num_to_string(sent_payload_flits) + "/" +
+                          num_to_string(payload_flits) +
+                          " packed flits.");
+            }
         }
     }
 
@@ -247,32 +286,39 @@ SC_MODULE(Controller)
             req_seen = true;
             idle_cycles = 0;
             idle_reports = 0;
-            sc_lv<34> flit = flit_rx.read();
-            int type = flit.range(33, 32).to_uint();
+            Flit flit = flit_rx.read();
+            int type = get_flit_type(flit);
 
-            if (type == 2)
+            if (type == NOC_HEAD_FLIT)
             {
                 // HEAD starts a new return packet.
                 packet = Packet();
-                packet.dest_id = flit.range(31, 16).to_uint();
-                packet.source_id = flit.range(15, 0).to_uint();
+                packet.dest_id = get_header_dest(flit);
+                packet.source_id = get_header_source(flit);
                 active = true;
                 packet_flits = 1;
             }
-            else if (active && (type == 0 || type == 1))
+            else if (active && (type == NOC_BODY_FLIT || type == NOC_TAIL_FLIT))
             {
                 // BODY/TAIL payloads are reconstructed from raw float bits.
-                union
-                {
-                    float fval;
-                    unsigned int ival;
-                } converter;
+                int count = get_flit_count(flit);
+                if (count <= 0 || count > PACKED_FLIT_WORDS)
+                    count = PACKED_FLIT_WORDS;
 
-                converter.ival = flit.range(31, 0).to_uint();
-                packet.datas.push_back(converter.fval);
+                for (int lane = 0; lane < count; lane++)
+                {
+                    union
+                    {
+                        float fval;
+                        unsigned int ival;
+                    } converter;
+
+                    converter.ival = get_flit_word(flit, lane);
+                    packet.datas.push_back(converter.fval);
+                }
                 packet_flits++;
 
-                if (type == 1)
+                if (type == NOC_TAIL_FLIT)
                 {
                     set_rx_ready(false);
                     return packet;
@@ -286,7 +332,7 @@ SC_MODULE(Controller)
                 {
                     deadlock_watchdog_report_unexpected_flit(0,
                                                              type,
-                                                             flit.range(31, 0).to_uint(),
+                                                             get_flit_word(flit, 0),
                                                              active ? 1 : 0,
                                                              packet_flits);
                     debug_log(string("Deadlock watchdog: unexpected flit type ") +

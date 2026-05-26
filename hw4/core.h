@@ -1,8 +1,10 @@
 #ifndef CORE_H
 #define CORE_H
 
+#include "noc.h"
 #include "pe.h"
 #include "systemc.h"
+#include <algorithm>
 #include <queue>
 
 using namespace std;
@@ -14,12 +16,12 @@ SC_MODULE(Core)
     sc_in<bool> clk;
 
     // Router -> Core link. Incoming flits are deserialized into packets.
-    sc_in<sc_lv<34>> flit_rx;
+    sc_in<Flit> flit_rx;
     sc_in<bool> req_rx;
     sc_out<bool> ack_rx;
 
     // Core -> Router link. Completed PE result packets are serialized here.
-    sc_out<sc_lv<34>> flit_tx;
+    sc_out<Flit> flit_tx;
     sc_out<bool> req_tx;
     sc_in<bool> ack_tx;
 
@@ -29,6 +31,8 @@ SC_MODULE(Core)
 
     // Result packets waiting to be sent back to the Controller.
     queue<Packet *> tx_packets;
+
+    static const int PACKET_PROGRESS_FLITS = 50000;
 
     // Bind Core and PE id to the local router id.
     void init(int core_id)
@@ -45,7 +49,7 @@ SC_MODULE(Core)
     }
 
     // Send one flit using the valid-ready protocol.
-    void send_flit(const sc_lv<34> &flit)
+    void send_flit(const Flit &flit)
     {
         while (true)
         {
@@ -77,7 +81,7 @@ SC_MODULE(Core)
         {
             if (rst.read())
             {
-                sc_lv<34> zero_flit;
+                Flit zero_flit;
                 zero_flit = 0;
                 req_tx.write(false);
                 flit_tx.write(zero_flit);
@@ -97,29 +101,55 @@ SC_MODULE(Core)
                  << " start send packet to " << packet->dest_id
                  << ", first_word=" << packet_first_word(packet)
                  << ", payload_size=" << packet->datas.size() << "." << endl;
+            int payload_flits =
+                (packet->datas.size() + PACKED_FLIT_WORDS - 1) / PACKED_FLIT_WORDS;
+            bool report_progress = payload_flits >= PACKET_PROGRESS_FLITS;
+            int sent_payload_flits = 0;
 
             // HEAD flit layout: type, destination id, source id.
-            sc_lv<34> header;
-            header.range(33, 32) = 2;
-            header.range(31, 16) = packet->dest_id;
-            header.range(15, 0) = packet->source_id;
+            Flit header;
+            header = 0;
+            set_flit_type(header, NOC_HEAD_FLIT);
+            set_flit_count(header, 0);
+            set_header_fields(header, packet->dest_id, packet->source_id);
             send_flit(header);
 
-            for (size_t i = 0; i < packet->datas.size(); i++)
+            for (size_t i = 0; i < packet->datas.size();)
             {
-                // Payload flits carry raw float bits in [31:0].
-                sc_lv<34> flit;
-                flit.range(33, 32) = (i == packet->datas.size() - 1) ? 1 : 0;
+                // Payload flits carry multiple raw float words.
+                int count = (int)min((size_t)PACKED_FLIT_WORDS,
+                                     packet->datas.size() - i);
+                bool last = (i + count == packet->datas.size());
 
-                union
+                Flit flit;
+                flit = 0;
+                set_flit_type(flit, last ? NOC_TAIL_FLIT : NOC_BODY_FLIT);
+                set_flit_count(flit, count);
+
+                for (int lane = 0; lane < count; lane++)
                 {
-                    float fval;
-                    unsigned int ival;
-                } converter;
+                    union
+                    {
+                        float fval;
+                        unsigned int ival;
+                    } converter;
 
-                converter.fval = packet->datas[i];
-                flit.range(31, 0) = converter.ival;
+                    converter.fval = packet->datas[i + lane];
+                    set_flit_word(flit, lane, converter.ival);
+                }
                 send_flit(flit);
+                i += count;
+                sent_payload_flits++;
+
+                if (report_progress &&
+                    (sent_payload_flits % PACKET_PROGRESS_FLITS == 0 ||
+                     sent_payload_flits == payload_flits))
+                {
+                    cout << "[CORE_TX] PE " << id
+                         << " send progress: "
+                         << sent_payload_flits << "/" << payload_flits
+                         << " packed flits." << endl;
+                }
             }
 
             delete packet;
@@ -129,34 +159,41 @@ SC_MODULE(Core)
     }
 
     // Decode an incoming flit and update the packet being reconstructed.
-    void receive_flit(const sc_lv<34> &flit, Packet &packet, bool &packet_active)
+    void receive_flit(const Flit &flit, Packet &packet, bool &packet_active)
     {
-        unsigned int type = flit.range(33, 32).to_uint();
+        unsigned int type = get_flit_type(flit);
 
-        if (type == 2)
+        if (type == NOC_HEAD_FLIT)
         {
             // HEAD starts a new packet and carries routing metadata.
             packet = Packet();
-            packet.dest_id = flit.range(31, 16).to_uint();
-            packet.source_id = flit.range(15, 0).to_uint();
+            packet.dest_id = get_header_dest(flit);
+            packet.source_id = get_header_source(flit);
             packet_active = true;
             return;
         }
 
-        if (!packet_active || (type != 0 && type != 1))
+        if (!packet_active || (type != NOC_BODY_FLIT && type != NOC_TAIL_FLIT))
             return;
 
         // BODY/TAIL payloads are converted from raw bits back to float values.
-        union
+        int count = get_flit_count(flit);
+        if (count <= 0 || count > PACKED_FLIT_WORDS)
+            count = PACKED_FLIT_WORDS;
+
+        for (int lane = 0; lane < count; lane++)
         {
-            float fval;
-            unsigned int ival;
-        } converter;
+            union
+            {
+                float fval;
+                unsigned int ival;
+            } converter;
 
-        converter.ival = flit.range(31, 0).to_uint();
-        packet.datas.push_back(converter.fval);
+            converter.ival = get_flit_word(flit, lane);
+            packet.datas.push_back(converter.fval);
+        }
 
-        if (type == 1)
+        if (type == NOC_TAIL_FLIT)
         {
             // TAIL completes the packet. Run PE computation and enqueue result.
             if (!packet.datas.empty())
@@ -227,7 +264,7 @@ SC_MODULE(Core)
     SC_HAS_PROCESS(Core);
     Core(sc_module_name name) : sc_module(name), pe("pe"), id(0)
     {
-        sc_lv<34> zero_flit;
+        Flit zero_flit;
         zero_flit = 0;
         req_tx.initialize(false);
         ack_rx.initialize(true);

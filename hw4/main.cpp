@@ -1,6 +1,7 @@
 #include "clockreset.h"
 #include "controller.h"
 #include "core.h"
+#include "noc.h"
 #include "router.h"
 #include "ROM.h"
 #include "systemc.h"
@@ -26,34 +27,34 @@ int sc_main(int argc, char* argv[])
 
     // Controller <-> router[0] local port.
     // The Controller acts as the master NoC endpoint at mesh node 0.
-    sc_signal < sc_lv<34> > ctrl2r_flit;
+    sc_signal < Flit > ctrl2r_flit;
     sc_signal < bool > ctrl2r_req;
     sc_signal < bool > ctrl2r_ack;
-    sc_signal < sc_lv<34> > r2ctrl_flit;
+    sc_signal < Flit > r2ctrl_flit;
     sc_signal < bool > r2ctrl_req;
     sc_signal < bool > r2ctrl_ack;
 
     // Worker core <-> local router ports. Core 0 is reserved for the controller.
     // Worker Core/PE nodes are placed at mesh ids 1 through 15.
-    sc_signal < sc_lv<34> > c2r_flit[16];
+    sc_signal < Flit > c2r_flit[16];
     sc_signal < bool > c2r_req[16];
     sc_signal < bool > c2r_ack[16];
-    sc_signal < sc_lv<34> > r2c_flit[16];
+    sc_signal < Flit > r2c_flit[16];
     sc_signal < bool > r2c_req[16];
     sc_signal < bool > r2c_ack[16];
 
     // Router-to-router mesh links: NORTH, SOUTH, EAST, WEST.
-    sc_signal < sc_lv<34> > r2r_flit[16][4];
+    sc_signal < Flit > r2r_flit[16][4];
     sc_signal < bool > r2r_req[16][4];
     sc_signal < bool > r2r_ack[16][4];
 
     // Boundary dummy links.
     // Edge routers still have all five ports connected, but off-chip mesh
     // directions are tied to idle dummy signals.
-    sc_signal < sc_lv<34> > dummy_out_flit[16][4];
+    sc_signal < Flit > dummy_out_flit[16][4];
     sc_signal < bool > dummy_out_req[16][4];
     sc_signal < bool > dummy_in_ack[16][4];
-    sc_signal < sc_lv<34> > dummy_in_flit[16][4];
+    sc_signal < Flit > dummy_in_flit[16][4];
     sc_signal < bool > dummy_in_req[16][4];
     sc_signal < bool > dummy_out_ack[16][4];
 

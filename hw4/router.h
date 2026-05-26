@@ -1,6 +1,7 @@
 #ifndef ROUTER_H
 #define ROUTER_H
 
+#include "noc.h"
 #include "systemc.h"
 #include <queue>
 
@@ -57,12 +58,12 @@ SC_MODULE( Router ) {
     // Switch routing policy here.
     // ROUTING_FULL_XY: every unicast packet uses deterministic XY routing.
     // ROUTING_ESCAPE_ADAPTIVE: VC0 uses XY as escape VC, VC1 uses adaptive minimal routing.
-    static const int ROUTING_MODE = ROUTING_FULL_XY;
+    static const int ROUTING_MODE = ROUTING_ESCAPE_ADAPTIVE;
 
     enum FlitType {
-        BODY_FLIT = 0,
-        TAIL_FLIT = 1,
-        HEAD_FLIT = 2
+        BODY_FLIT = NOC_BODY_FLIT,
+        TAIL_FLIT = NOC_TAIL_FLIT,
+        HEAD_FLIT = NOC_HEAD_FLIT
     };
 
     struct InputResult {
@@ -84,24 +85,24 @@ SC_MODULE( Router ) {
     sc_in  < bool >  clk;
 
     // Output-side valid-ready links.
-    sc_out < sc_lv<34> > out_flit[PORT_NUM];
+    sc_out < Flit > out_flit[PORT_NUM];
     sc_out < bool > out_req[PORT_NUM];
     sc_in  < bool > in_ack[PORT_NUM];
 
     // Input-side valid-ready links.
-    sc_in  < sc_lv<34> > in_flit[PORT_NUM];
+    sc_in  < Flit > in_flit[PORT_NUM];
     sc_in  < bool > in_req[PORT_NUM];
     sc_out < bool > out_ack[PORT_NUM];
 
     int router_id;
 
     // Input virtual-channel buffers.
-    queue<sc_lv<34> > in_q[PORT_NUM][VC_NUM];
+    queue<Flit > in_q[PORT_NUM][VC_NUM];
 
     // Output queues and output-sync holding registers.
-    queue<sc_lv<34> > out_q[PORT_NUM];
+    queue<Flit > out_q[PORT_NUM];
     bool tx_active[PORT_NUM];
-    sc_lv<34> tx_buffer[PORT_NUM];
+    Flit tx_buffer[PORT_NUM];
 
     // Packet-level allocation state.
     int vc_state[PORT_NUM][VC_NUM];
@@ -127,21 +128,23 @@ SC_MODULE( Router ) {
         router_id = id;
     }
 
-    // Decode flit type from bits [33:32]: 2=HEAD, 0=BODY, 1=TAIL.
-    int flit_type(const sc_lv<34> &flit)
+    static const bool ROUTER_VERBOSE_DEBUG = false;
+
+    // Decode flit type: 2=HEAD, 0=BODY, 1=TAIL.
+    int flit_type(const Flit &flit)
     {
-        return flit.range(33, 32).to_uint();
+        return get_flit_type(flit);
     }
 
-    // Destination id is stored in bits [31:16] of the HEAD flit.
-    int flit_dest_id(const sc_lv<34> &flit)
+    // Destination id is stored in payload lane 0 of the HEAD flit.
+    int flit_dest_id(const Flit &flit)
     {
-        return flit.range(31, 16).to_uint();
+        return get_header_dest(flit);
     }
 
-    int flit_source_id(const sc_lv<34> &flit)
+    int flit_source_id(const Flit &flit)
     {
-        return flit.range(15, 0).to_uint();
+        return get_header_source(flit);
     }
 
     const char *port_name(int port)
@@ -163,13 +166,16 @@ SC_MODULE( Router ) {
         }
     }
 
-    bool is_broadcast_flit(const sc_lv<34> &flit)
+    bool is_broadcast_flit(const Flit &flit)
     {
         return flit_dest_id(flit) == BROADCAST_ID;
     }
 
-    void debug_note_input_accept(int input_port, const sc_lv<34> &flit)
+    void debug_note_input_accept(int input_port, const Flit &flit)
     {
+        if (!ROUTER_VERBOSE_DEBUG)
+            return;
+
         int type = flit_type(flit);
 
         if (type == HEAD_FLIT)
@@ -197,8 +203,11 @@ SC_MODULE( Router ) {
         }
     }
 
-    void debug_note_output_transfer(int output_port, const sc_lv<34> &flit)
+    void debug_note_output_transfer(int output_port, const Flit &flit)
     {
+        if (!ROUTER_VERBOSE_DEBUG)
+            return;
+
         int type = flit_type(flit);
 
         if (type == HEAD_FLIT)
@@ -247,7 +256,7 @@ SC_MODULE( Router ) {
         return LOCAL;
     }
 
-    void clear_queue(queue<sc_lv<34> > &q)
+    void clear_queue(queue<Flit > &q)
     {
         while (!q.empty())
             q.pop();
@@ -280,7 +289,7 @@ SC_MODULE( Router ) {
     while keeping one deadlock-free escape path. Adaptive routing is only used
     on VC1; VC0 always follows XY.
     */
-    int preferred_vc_for_header(const sc_lv<34> &flit)
+    int preferred_vc_for_header(const Flit &flit)
     {
         (void)flit;
         if (ROUTING_MODE == ROUTING_FULL_XY)
@@ -288,7 +297,7 @@ SC_MODULE( Router ) {
         return 1;
     }
 
-    int choose_input_vc(int input_port, const sc_lv<34> &flit)
+    int choose_input_vc(int input_port, const Flit &flit)
     {
         int preferred = preferred_vc_for_header(flit);
         int other = 1 - preferred;
@@ -414,7 +423,7 @@ SC_MODULE( Router ) {
         if (!in_req[input_port].read())
             return true;
 
-        sc_lv<34> incoming = in_flit[input_port].read();
+        Flit incoming = in_flit[input_port].read();
         if (flit_type(incoming) != HEAD_FLIT || !is_broadcast_flit(incoming))
             return false;
         build_broadcast_mask(input_port);
@@ -426,7 +435,7 @@ SC_MODULE( Router ) {
         if (!in_req[input_port].read())
             return false;
 
-        sc_lv<34> incoming = in_flit[input_port].read();
+        Flit incoming = in_flit[input_port].read();
         int type = flit_type(incoming);
 
         if (!broadcast_active[input_port])
@@ -520,7 +529,7 @@ SC_MODULE( Router ) {
         return (y_wait < x_wait) ? y_dir : x_dir;
     }
 
-    int route_for_vc(const sc_lv<34> &header, int vc)
+    int route_for_vc(const Flit &header, int vc)
     {
         int dest_id = flit_dest_id(header);
         if (ROUTING_MODE == ROUTING_FULL_XY)
@@ -544,7 +553,7 @@ SC_MODULE( Router ) {
         if (!in_req[input_port].read())
             return any_vc_has_space(input_port);
 
-        sc_lv<34> incoming = in_flit[input_port].read();
+        Flit incoming = in_flit[input_port].read();
         int type = flit_type(incoming);
 
         if (type == HEAD_FLIT && is_broadcast_flit(incoming))
@@ -576,7 +585,7 @@ SC_MODULE( Router ) {
         if (!in_req[input_port].read())
             return result;
 
-        sc_lv<34> incoming = in_flit[input_port].read();
+        Flit incoming = in_flit[input_port].read();
         int type = flit_type(incoming);
         int vc = rx_current_vc[input_port];
 
@@ -660,7 +669,7 @@ SC_MODULE( Router ) {
                 if (in_q[input_port][vc].empty())
                     continue;
 
-                sc_lv<34> candidate = in_q[input_port][vc].front();
+                Flit candidate = in_q[input_port][vc].front();
                 int type = flit_type(candidate);
 
                 if (vc_state[input_port][vc] == -1)
@@ -707,7 +716,7 @@ SC_MODULE( Router ) {
         if (grant.input_port == -1)
             return;
 
-        sc_lv<34> flit = in_q[grant.input_port][grant.vc].front();
+        Flit flit = in_q[grant.input_port][grant.vc].front();
         int type = flit_type(flit);
         int owner_source = out_lock_source[out];
         deadlock_watchdog_clear_waiter(owner_source);
@@ -785,7 +794,7 @@ SC_MODULE( Router ) {
         {
             if (rst.read())
             {
-                sc_lv<34> zero_flit;
+                Flit zero_flit;
                 zero_flit = 0;
                 tx_active[output_port] = false;
                 tx_buffer[output_port] = zero_flit;
@@ -800,26 +809,29 @@ SC_MODULE( Router ) {
                 int type = flit_type(tx_buffer[output_port]);
                 int dest_id = (type == HEAD_FLIT) ? flit_dest_id(tx_buffer[output_port]) : -1;
                 int source_id = (type == HEAD_FLIT) ? flit_source_id(tx_buffer[output_port]) : -1;
-                if (type == HEAD_FLIT)
+                if (ROUTER_VERBOSE_DEBUG && type == HEAD_FLIT)
                 {
                     cout << "[ROUTER_PKT] router " << router_id
                          << " output " << port_name(output_port)
                          << " HEAD dest=" << dest_id
                          << " source=" << source_id << "." << endl;
                 }
-                else if (type == TAIL_FLIT)
+                else if (ROUTER_VERBOSE_DEBUG && type == TAIL_FLIT)
                 {
                     cout << "[ROUTER_PKT] router " << router_id
                          << " output " << port_name(output_port)
                          << " TAIL." << endl;
                 }
                 debug_note_output_transfer(output_port, tx_buffer[output_port]);
-                deadlock_watchdog_note_flit_transfer(router_id,
-                                                     output_port,
-                                                     type,
-                                                     tx_buffer[output_port].range(31, 0).to_uint(),
-                                                     dest_id,
-                                                     source_id);
+                if (ROUTER_VERBOSE_DEBUG)
+                {
+                    deadlock_watchdog_note_flit_transfer(router_id,
+                                                         output_port,
+                                                         type,
+                                                         get_flit_word(tx_buffer[output_port], 0),
+                                                         dest_id,
+                                                         source_id);
+                }
                 if (!out_q[output_port].empty())
                     out_q[output_port].pop();
                 tx_active[output_port] = false;
@@ -828,7 +840,8 @@ SC_MODULE( Router ) {
                 continue;
             }
 
-            if (dbg_out_packet_active[output_port] &&
+            if (ROUTER_VERBOSE_DEBUG &&
+                dbg_out_packet_active[output_port] &&
                 !tx_active[output_port] &&
                 out_q[output_port].empty())
             {
@@ -884,7 +897,7 @@ SC_MODULE( Router ) {
     SC_CTOR( Router )
     {
         router_id = 0;
-        sc_lv<34> zero_flit;
+        Flit zero_flit;
         zero_flit = 0;
 
         for (int p = 0; p < PORT_NUM; p++)
