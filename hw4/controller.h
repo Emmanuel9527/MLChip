@@ -296,9 +296,23 @@ SC_MODULE(Controller)
         return !packet.datas.empty() && (int)packet.datas[0] == first_word;
     }
 
+    bool packet_is_load_ack(const Packet &packet, int expected_source)
+    {
+        if (packet.datas.size() != 3)
+            return false;
+        if ((int)packet.datas[0] != LOAD_ACK_WORD)
+            return false;
+        int ack_op = (int)packet.datas[1];
+        if (ack_op != OP_LOAD_INPUT &&
+            ack_op != OP_LOAD_WEIGHT &&
+            ack_op != OP_LOAD_BIAS)
+            return false;
+        return expected_source < 0 || packet.source_id == expected_source;
+    }
+
     bool packet_is_load_ack_op(const Packet &packet, int expected_source, int expected_op)
     {
-        return packet.datas.size() > 1 &&
+        return packet.datas.size() == 3 &&
                (int)packet.datas[0] == LOAD_ACK_WORD &&
                (int)packet.datas[1] == expected_op &&
                (expected_source < 0 || packet.source_id == expected_source);
@@ -317,13 +331,23 @@ SC_MODULE(Controller)
         {
             for (size_t i = 0; i < pending_packets.size(); i++)
             {
-                if (packet_first_word_is(pending_packets[i], first_word) &&
+                if (first_word == LOAD_ACK_WORD &&
+                    packet_is_load_ack(pending_packets[i], expected_source))
+                    return take_pending_packet(i);
+
+                if (first_word != LOAD_ACK_WORD &&
+                    packet_first_word_is(pending_packets[i], first_word) &&
                     (expected_source < 0 || pending_packets[i].source_id == expected_source))
                     return take_pending_packet(i);
             }
 
             Packet packet = receive_packet();
-            if (packet_first_word_is(packet, first_word) &&
+            if (first_word == LOAD_ACK_WORD &&
+                packet_is_load_ack(packet, expected_source))
+                return packet;
+
+            if (first_word != LOAD_ACK_WORD &&
+                packet_first_word_is(packet, first_word) &&
                 (expected_source < 0 || packet.source_id == expected_source))
                 return packet;
 
@@ -340,12 +364,12 @@ SC_MODULE(Controller)
         {
             for (size_t i = 0; i < pending_packets.size(); i++)
             {
-                if (!packet_first_word_is(pending_packets[i], LOAD_ACK_WORD))
+                if (!packet_is_load_ack(pending_packets[i], -1))
                     return take_pending_packet(i);
             }
 
             Packet packet = receive_packet();
-            if (!packet_first_word_is(packet, LOAD_ACK_WORD))
+            if (!packet_is_load_ack(packet, -1))
                 return packet;
 
             debug_log(string("Dropping stale load ACK from PE ") +
