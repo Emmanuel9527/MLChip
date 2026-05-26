@@ -7,20 +7,21 @@
 
 using namespace std;
 
-SC_MODULE( Core ) {
+SC_MODULE(Core)
+{
     // Clock/reset and local router handshake interface.
-    sc_in  < bool >  rst;
-    sc_in  < bool >  clk;
+    sc_in<bool> rst;
+    sc_in<bool> clk;
 
     // Router -> Core link. Incoming flits are deserialized into packets.
-    sc_in  < sc_lv<34> > flit_rx;
-    sc_in  < bool > req_rx;
-    sc_out < bool > ack_rx;
+    sc_in<sc_lv<34>> flit_rx;
+    sc_in<bool> req_rx;
+    sc_out<bool> ack_rx;
 
     // Core -> Router link. Completed PE result packets are serialized here.
-    sc_out < sc_lv<34> > flit_tx;
-    sc_out < bool > req_tx;
-    sc_in  < bool > ack_tx;
+    sc_out<sc_lv<34>> flit_tx;
+    sc_out<bool> req_tx;
+    sc_in<bool> ack_tx;
 
     // One PE sits behind each worker Core.
     PE pe;
@@ -36,7 +37,7 @@ SC_MODULE( Core ) {
         pe.init(core_id);
     }
 
-    int packet_first_word(Packet *packet)
+    int packet_first_word(Packet * packet)
     {
         if (packet == NULL || packet->datas.empty())
             return -1;
@@ -110,7 +111,8 @@ SC_MODULE( Core ) {
                 sc_lv<34> flit;
                 flit.range(33, 32) = (i == packet->datas.size() - 1) ? 1 : 0;
 
-                union {
+                union
+                {
                     float fval;
                     unsigned int ival;
                 } converter;
@@ -145,7 +147,8 @@ SC_MODULE( Core ) {
             return;
 
         // BODY/TAIL payloads are converted from raw bits back to float values.
-        union {
+        union
+        {
             float fval;
             unsigned int ival;
         } converter;

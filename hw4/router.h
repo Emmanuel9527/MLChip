@@ -49,6 +49,16 @@ SC_MODULE( Router ) {
     static const int VC_DEPTH = 16;
     static const int OUT_DEPTH = 8;
 
+    enum RoutingMode {
+        ROUTING_FULL_XY = 0,
+        ROUTING_ESCAPE_ADAPTIVE = 1
+    };
+
+    // Switch routing policy here.
+    // ROUTING_FULL_XY: every unicast packet uses deterministic XY routing.
+    // ROUTING_ESCAPE_ADAPTIVE: VC0 uses XY as escape VC, VC1 uses adaptive minimal routing.
+    static const int ROUTING_MODE = ROUTING_FULL_XY;
+
     enum FlitType {
         BODY_FLIT = 0,
         TAIL_FLIT = 1,
@@ -185,6 +195,8 @@ SC_MODULE( Router ) {
     int preferred_vc_for_header(const sc_lv<34> &flit)
     {
         (void)flit;
+        if (ROUTING_MODE == ROUTING_FULL_XY)
+            return 0;
         return 1;
     }
 
@@ -425,6 +437,9 @@ SC_MODULE( Router ) {
     int route_for_vc(const sc_lv<34> &header, int vc)
     {
         int dest_id = flit_dest_id(header);
+        if (ROUTING_MODE == ROUTING_FULL_XY)
+            return xy_route(router_id, dest_id);
+
         if (vc == 0)
             return xy_route(router_id, dest_id);
         return adaptive_minimal_route(router_id, dest_id);
