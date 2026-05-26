@@ -117,6 +117,45 @@ namespace
         return best;
     }
 
+    void print_recent_link_transfers(int router_id, int out_port, int limit)
+    {
+        int printed = 0;
+        unsigned int next_sequence = flit_sequence;
+
+        while (printed < limit && next_sequence > 0)
+        {
+            next_sequence--;
+            for (int i = 0; i < RECENT_FLIT_COUNT; i++)
+            {
+                if (!recent_flits[i].valid ||
+                    recent_flits[i].sequence != next_sequence ||
+                    recent_flits[i].router_id != router_id ||
+                    recent_flits[i].out_port != out_port)
+                    continue;
+
+                const RecentFlit &flit = recent_flits[i];
+                cout << "[FLIT_DEBUG]     seq " << flit.sequence
+                     << ": type=" << flit.flit_type
+                     << "(" << flit_type_name(flit.flit_type) << "), ";
+                print_flit_payload(flit.payload);
+                if (flit.flit_type == 2)
+                {
+                    cout << ", dest=" << flit.dest_id
+                         << ", source=" << flit.source_id;
+                }
+                cout << endl;
+                printed++;
+                break;
+            }
+        }
+
+        if (printed == 0)
+        {
+            cout << "[FLIT_DEBUG]     No recent transfers recorded on router "
+                 << router_id << " output " << port_name(out_port) << "." << endl;
+        }
+    }
+
     bool dfs_cycle(int current, int target, bool visited[], vector<int> &path)
     {
         visited[current] = true;
@@ -219,6 +258,12 @@ extern "C" void deadlock_watchdog_report_unexpected_flit(int expected_node,
              << ", source=" << flit.source_id;
     }
     cout << endl;
+
+    if (expected_node == 0)
+    {
+        cout << "[FLIT_DEBUG]   Recent router 0 LOCAL transfers to Controller:" << endl;
+        print_recent_link_transfers(0, 4, 8);
+    }
 }
 
 extern "C" void deadlock_watchdog_wait_edge(int waiter_core,
