@@ -8,10 +8,27 @@ using namespace std;
 namespace
 {
     const int NODE_COUNT = 16;
+    const int PORT_COUNT = 5;
+    const int RECENT_FLIT_COUNT = 32;
 
     bool wait_edge[NODE_COUNT][NODE_COUNT];
     string wait_detail[NODE_COUNT][NODE_COUNT];
     bool reported_cycle[NODE_COUNT][NODE_COUNT];
+
+    struct RecentFlit
+    {
+        bool valid;
+        int router_id;
+        int out_port;
+        int flit_type;
+        unsigned int payload;
+        int dest_id;
+        int source_id;
+        unsigned int sequence;
+    };
+
+    RecentFlit recent_flits[RECENT_FLIT_COUNT];
+    unsigned int flit_sequence;
 
     string node_name(int node)
     {
@@ -29,6 +46,75 @@ namespace
             oss << node_name(path[i]) << " -> ";
         oss << node_name(closing_node);
         return oss.str();
+    }
+
+    string port_name(int port)
+    {
+        switch (port)
+        {
+        case 0:
+            return "NORTH";
+        case 1:
+            return "SOUTH";
+        case 2:
+            return "EAST";
+        case 3:
+            return "WEST";
+        case 4:
+            return "LOCAL";
+        default:
+            return "UNKNOWN";
+        }
+    }
+
+    string flit_type_name(int type)
+    {
+        switch (type)
+        {
+        case 0:
+            return "BODY";
+        case 1:
+            return "TAIL";
+        case 2:
+            return "HEAD";
+        default:
+            return "INVALID";
+        }
+    }
+
+    void print_flit_payload(unsigned int payload)
+    {
+        union
+        {
+            float fval;
+            unsigned int ival;
+        } converter;
+
+        converter.ival = payload;
+        cout << "payload_raw=0x" << hex << payload << dec
+             << ", payload_float=" << converter.fval;
+    }
+
+    int find_recent_matching_flit(int flit_type, unsigned int payload)
+    {
+        int best = -1;
+        unsigned int best_sequence = 0;
+
+        for (int i = 0; i < RECENT_FLIT_COUNT; i++)
+        {
+            if (!recent_flits[i].valid)
+                continue;
+            if (recent_flits[i].flit_type != flit_type ||
+                recent_flits[i].payload != payload)
+                continue;
+            if (best == -1 || recent_flits[i].sequence > best_sequence)
+            {
+                best = i;
+                best_sequence = recent_flits[i].sequence;
+            }
+        }
+
+        return best;
     }
 
     bool dfs_cycle(int current, int target, bool visited[], vector<int> &path)
@@ -78,6 +164,61 @@ extern "C" void deadlock_watchdog_clear()
             reported_cycle[i][j] = false;
         }
     }
+
+    for (int i = 0; i < RECENT_FLIT_COUNT; i++)
+        recent_flits[i].valid = false;
+    flit_sequence = 0;
+}
+
+extern "C" void deadlock_watchdog_note_flit_transfer(int router_id,
+                                                     int out_port,
+                                                     int flit_type,
+                                                     unsigned int payload,
+                                                     int dest_id,
+                                                     int source_id)
+{
+    int index = flit_sequence % RECENT_FLIT_COUNT;
+    recent_flits[index].valid = true;
+    recent_flits[index].router_id = router_id;
+    recent_flits[index].out_port = out_port;
+    recent_flits[index].flit_type = flit_type;
+    recent_flits[index].payload = payload;
+    recent_flits[index].dest_id = dest_id;
+    recent_flits[index].source_id = source_id;
+    recent_flits[index].sequence = flit_sequence;
+    flit_sequence++;
+}
+
+extern "C" void deadlock_watchdog_report_unexpected_flit(int expected_node,
+                                                         int flit_type,
+                                                         unsigned int payload,
+                                                         int active,
+                                                         int packet_flits)
+{
+    cout << "[FLIT_DEBUG] Unexpected flit at " << node_name(expected_node)
+         << ": type=" << flit_type << "(" << flit_type_name(flit_type) << "), ";
+    print_flit_payload(payload);
+    cout << ", active=" << active
+         << ", packet_flits=" << packet_flits << "." << endl;
+
+    int recent = find_recent_matching_flit(flit_type, payload);
+    if (recent == -1)
+    {
+        cout << "[FLIT_DEBUG]   No matching recent router transfer was recorded." << endl;
+        return;
+    }
+
+    const RecentFlit &flit = recent_flits[recent];
+    cout << "[FLIT_DEBUG]   Last matching transfer: router " << flit.router_id
+         << " output " << port_name(flit.out_port)
+         << ", sequence " << flit.sequence << ".";
+
+    if (flit.flit_type == 2)
+    {
+        cout << " dest=" << flit.dest_id
+             << ", source=" << flit.source_id;
+    }
+    cout << endl;
 }
 
 extern "C" void deadlock_watchdog_wait_edge(int waiter_core,

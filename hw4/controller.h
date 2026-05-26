@@ -18,6 +18,12 @@ using namespace std;
 
 #define DEBUG_PROGRESS true
 
+extern "C" void deadlock_watchdog_report_unexpected_flit(int expected_node,
+                                                         int flit_type,
+                                                         unsigned int payload,
+                                                         int active,
+                                                         int packet_flits);
+
 SC_MODULE(Controller)
 {
     sc_in<bool> rst;
@@ -262,6 +268,11 @@ SC_MODULE(Controller)
                 if (unexpected_flits <= UNEXPECTED_FLIT_LOG_LIMIT ||
                     unexpected_flits % UNEXPECTED_FLIT_LOG_INTERVAL == 0)
                 {
+                    deadlock_watchdog_report_unexpected_flit(0,
+                                                             type,
+                                                             flit.range(31, 0).to_uint(),
+                                                             active ? 1 : 0,
+                                                             packet_flits);
                     debug_log(string("Deadlock watchdog: unexpected flit type ") +
                               num_to_string(type) + " while waiting for " +
                               wait_context + ", active=" + num_to_string(active) +

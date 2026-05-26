@@ -20,6 +20,12 @@ extern "C" void deadlock_watchdog_wait_edge(int waiter_core,
                                             int input_port,
                                             int vc);
 extern "C" void deadlock_watchdog_clear_waiter(int core_id);
+extern "C" void deadlock_watchdog_note_flit_transfer(int router_id,
+                                                     int out_port,
+                                                     int flit_type,
+                                                     unsigned int payload,
+                                                     int dest_id,
+                                                     int source_id);
 
 SC_MODULE( Router ) {
     /*
@@ -680,6 +686,15 @@ SC_MODULE( Router ) {
 
             if (tx_active[output_port] && in_ack[output_port].read())
             {
+                int type = flit_type(tx_buffer[output_port]);
+                int dest_id = (type == HEAD_FLIT) ? flit_dest_id(tx_buffer[output_port]) : -1;
+                int source_id = (type == HEAD_FLIT) ? flit_source_id(tx_buffer[output_port]) : -1;
+                deadlock_watchdog_note_flit_transfer(router_id,
+                                                     output_port,
+                                                     type,
+                                                     tx_buffer[output_port].range(31, 0).to_uint(),
+                                                     dest_id,
+                                                     source_id);
                 if (!out_q[output_port].empty())
                     out_q[output_port].pop();
                 tx_active[output_port] = false;
