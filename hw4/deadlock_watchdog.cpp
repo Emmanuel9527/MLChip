@@ -84,6 +84,7 @@ namespace
 
     void print_flit_payload(unsigned int payload)
     {
+#ifdef DEBUG
         union
         {
             float fval;
@@ -93,6 +94,9 @@ namespace
         converter.ival = payload;
         cout << "payload_raw=0x" << hex << payload << dec
              << ", payload_float=" << converter.fval;
+#else
+        (void)payload;
+#endif
     }
 
     int find_recent_matching_flit(int flit_type, unsigned int payload)
@@ -119,6 +123,7 @@ namespace
 
     void print_recent_link_transfers(int router_id, int out_port, int limit)
     {
+#ifdef DEBUG
         int printed = 0;
         unsigned int next_sequence = flit_sequence;
 
@@ -154,6 +159,11 @@ namespace
             cout << "[FLIT_DEBUG]     No recent transfers recorded on router "
                  << router_id << " output " << port_name(out_port) << "." << endl;
         }
+#else
+        (void)router_id;
+        (void)out_port;
+        (void)limit;
+#endif
     }
 
     bool dfs_cycle(int current, int target, bool visited[], vector<int> &path)
@@ -177,6 +187,7 @@ namespace
 
     void print_wait_edge_details(const vector<int> &path, int closing_node)
     {
+#ifdef DEBUG
         for (size_t i = 0; i + 1 < path.size(); i++)
         {
             int from = path[i];
@@ -189,6 +200,10 @@ namespace
         int to = closing_node;
         if (!wait_detail[from][to].empty())
             cout << "[DEADLOCK]   " << wait_detail[from][to] << endl;
+#else
+        (void)path;
+        (void)closing_node;
+#endif
     }
 }
 
@@ -234,6 +249,7 @@ extern "C" void deadlock_watchdog_report_unexpected_flit(int expected_node,
                                                          int active,
                                                          int packet_flits)
 {
+#ifdef DEBUG
     cout << "[FLIT_DEBUG] Unexpected flit at " << node_name(expected_node)
          << ": type=" << flit_type << "(" << flit_type_name(flit_type) << "), ";
     print_flit_payload(payload);
@@ -264,6 +280,13 @@ extern "C" void deadlock_watchdog_report_unexpected_flit(int expected_node,
         cout << "[FLIT_DEBUG]   Recent router 0 LOCAL transfers to Controller:" << endl;
         print_recent_link_transfers(0, 4, 8);
     }
+#else
+    (void)expected_node;
+    (void)flit_type;
+    (void)payload;
+    (void)active;
+    (void)packet_flits;
+#endif
 }
 
 extern "C" void deadlock_watchdog_wait_edge(int waiter_core,
@@ -299,12 +322,14 @@ extern "C" void deadlock_watchdog_wait_edge(int waiter_core,
     if (dfs_cycle(owner_core, waiter_core, visited, path))
     {
         reported_cycle[waiter_core][owner_core] = true;
+#ifdef DEBUG
         cout << "[DEADLOCK] Circular waiting detected: "
              << node_name(waiter_core) << " -> "
              << cycle_string(path, 0, waiter_core) << endl;
         cout << "[DEADLOCK] Wait-for edges:" << endl;
         cout << "[DEADLOCK]   " << wait_detail[waiter_core][owner_core] << endl;
         print_wait_edge_details(path, waiter_core);
+#endif
     }
 }
 

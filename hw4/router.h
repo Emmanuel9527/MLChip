@@ -128,7 +128,11 @@ SC_MODULE( Router ) {
         router_id = id;
     }
 
+#ifdef DEBUG
+    static const bool ROUTER_VERBOSE_DEBUG = true;
+#else
     static const bool ROUTER_VERBOSE_DEBUG = false;
+#endif
 
     // Decode flit type: 2=HEAD, 0=BODY, 1=TAIL.
     int flit_type(const Flit &flit)

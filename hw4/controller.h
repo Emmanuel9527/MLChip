@@ -17,8 +17,6 @@
 
 using namespace std;
 
-#define DEBUG_PROGRESS true
-
 extern "C" void deadlock_watchdog_report_unexpected_flit(int expected_node,
                                                          int flit_type,
                                                          unsigned int payload,
@@ -77,8 +75,11 @@ SC_MODULE(Controller)
 
     void debug_log(const string &msg)
     {
-        if (DEBUG_PROGRESS)
-            cout << "[DEBUG] " << msg << endl;
+#ifdef DEBUG
+        cout << "[DEBUG] " << msg << endl;
+#else
+        (void)msg;
+#endif
     }
 
     void set_wait_context(const string &context)
@@ -186,7 +187,10 @@ SC_MODULE(Controller)
     {
         int payload_flits =
             (packet.datas.size() + PACKED_FLIT_WORDS - 1) / PACKED_FLIT_WORDS;
-        bool report_progress = payload_flits >= PACKET_PROGRESS_FLITS;
+        bool report_progress = false;
+#ifdef DEBUG
+        report_progress = payload_flits >= PACKET_PROGRESS_FLITS;
+#endif
         int sent_payload_flits = 0;
 
         if (report_progress)
@@ -330,11 +334,13 @@ SC_MODULE(Controller)
                 if (unexpected_flits <= UNEXPECTED_FLIT_LOG_LIMIT ||
                     unexpected_flits % UNEXPECTED_FLIT_LOG_INTERVAL == 0)
                 {
+#ifdef DEBUG
                     deadlock_watchdog_report_unexpected_flit(0,
                                                              type,
                                                              get_flit_word(flit, 0),
                                                              active ? 1 : 0,
                                                              packet_flits);
+#endif
                     debug_log(string("Deadlock watchdog: unexpected flit type ") +
                               num_to_string(type) + " while waiting for " +
                               wait_context + ", active=" + num_to_string(active) +

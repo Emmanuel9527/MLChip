@@ -97,13 +97,18 @@ SC_MODULE(Core)
 
             Packet *packet = tx_packets.front();
             tx_packets.pop();
+#ifdef DEBUG
             cout << "[CORE_TX] PE " << id
                  << " start send packet to " << packet->dest_id
                  << ", first_word=" << packet_first_word(packet)
                  << ", payload_size=" << packet->datas.size() << "." << endl;
+#endif
             int payload_flits =
                 (packet->datas.size() + PACKED_FLIT_WORDS - 1) / PACKED_FLIT_WORDS;
-            bool report_progress = payload_flits >= PACKET_PROGRESS_FLITS;
+            bool report_progress = false;
+#ifdef DEBUG
+            report_progress = payload_flits >= PACKET_PROGRESS_FLITS;
+#endif
             int sent_payload_flits = 0;
 
             // HEAD flit layout: type, destination id, source id.
@@ -145,16 +150,20 @@ SC_MODULE(Core)
                     (sent_payload_flits % PACKET_PROGRESS_FLITS == 0 ||
                      sent_payload_flits == payload_flits))
                 {
+#ifdef DEBUG
                     cout << "[CORE_TX] PE " << id
                          << " send progress: "
                          << sent_payload_flits << "/" << payload_flits
                          << " packed flits." << endl;
+#endif
                 }
             }
 
             delete packet;
+#ifdef DEBUG
             cout << "[CORE_TX] PE " << id
                  << " finished sending packet." << endl;
+#endif
         }
     }
 
@@ -198,6 +207,7 @@ SC_MODULE(Core)
             // TAIL completes the packet. Run PE computation and enqueue result.
             if (!packet.datas.empty())
             {
+#ifdef DEBUG
                 int op = (int)packet.datas[0];
                 cout << "[CORE_RX] PE " << id
                      << " received packet from " << packet.source_id
@@ -208,15 +218,18 @@ SC_MODULE(Core)
                     packet.datas.size() > 1)
                     cout << ", job=" << (int)packet.datas[1];
                 cout << ", payload_size=" << packet.datas.size() << "." << endl;
+#endif
             }
 
             Packet *result = pe.process_packet(packet);
             if (result != NULL)
             {
+#ifdef DEBUG
                 cout << "[CORE_RX] PE " << id
                      << " queued result packet, first_word="
                      << packet_first_word(result)
                      << ", payload_size=" << result->datas.size() << "." << endl;
+#endif
                 tx_packets.push(result);
             }
             packet = Packet();

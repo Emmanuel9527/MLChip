@@ -146,6 +146,7 @@ SC_MODULE(PE)
         int oc_start = (int)d[p++];
         int oc_count = (int)d[p++];
 
+#ifdef DEBUG
         cout << "[PE_DEBUG] PE " << id
              << " start CONV job " << job_id
              << ", oc_start=" << oc_start
@@ -153,16 +154,19 @@ SC_MODULE(PE)
              << ", input_values=" << input_buf.size()
              << ", weight_values=" << weight_buf.size()
              << ", bias_values=" << bias_buf.size() << "." << endl;
+#endif
 
         int out_h = (in_h - kernel) / stride + 1;
         int out_w = (in_w - kernel) / stride + 1;
         long long mac_count = (long long)oc_count * out_h * out_w *
                               in_ch * kernel * kernel;
+#ifdef DEBUG
         cout << "[PE_DEBUG] PE " << id
              << " CONV job " << job_id
              << " compute latency cycles="
              << ((mac_count + MACS_PER_CYCLE - 1) / MACS_PER_CYCLE)
              << " for macs=" << mac_count << "." << endl;
+#endif
         wait_for_macs(mac_count);
 
         Packet *result = make_result(job, job_id);
@@ -202,10 +206,12 @@ SC_MODULE(PE)
         }
 
         (void)out_ch;
+#ifdef DEBUG
         cout << "[PE_DEBUG] PE " << id
              << " finish CONV job " << job_id
              << ", result_payload_size=" << result->datas.size()
              << "." << endl;
+#endif
         return result;
     }
 
@@ -273,11 +279,13 @@ SC_MODULE(PE)
         int o_count = (int)d[p++];
 
         long long mac_count = (long long)o_count * in_size;
+#ifdef DEBUG
         cout << "[PE_DEBUG] PE " << id
              << " FC job " << job_id
              << " compute latency cycles="
              << ((mac_count + MACS_PER_CYCLE - 1) / MACS_PER_CYCLE)
              << " for macs=" << mac_count << "." << endl;
+#endif
         wait_for_macs(mac_count);
 
         Packet *result = make_result(job, job_id);
