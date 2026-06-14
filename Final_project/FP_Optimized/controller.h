@@ -1031,7 +1031,10 @@ SC_MODULE(Controller)
 
         for (int out_base = 0; out_base < out_size; out_base += SYSTOLIC_ARRAY_COLS)
         {
-            int active_cols = min(SYSTOLIC_ARRAY_COLS, out_size - out_base);
+            int remaining_outputs = out_size - out_base;
+            int active_cols = (remaining_outputs < SYSTOLIC_ARRAY_COLS)
+                                  ? remaining_outputs
+                                  : SYSTOLIC_ARRAY_COLS;
 
             unsigned int bias_addr = dram_bias_base(layer) + (unsigned int)out_base * 4u;
             vector<float> bias_dma =
@@ -1055,7 +1058,10 @@ SC_MODULE(Controller)
             for (int input_base = 0; input_base < in_size;
                  input_base += SYSTOLIC_INPUT_TILE_WORDS)
             {
-                int tile_words = min(SYSTOLIC_INPUT_TILE_WORDS, in_size - input_base);
+                int remaining_inputs = in_size - input_base;
+                int tile_words = (remaining_inputs < SYSTOLIC_INPUT_TILE_WORDS)
+                                     ? remaining_inputs
+                                     : SYSTOLIC_INPUT_TILE_WORDS;
 
                 for (int data_row = 0; data_row < SYSTOLIC_ARRAY_ROWS; data_row++)
                 {
