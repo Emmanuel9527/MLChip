@@ -16,8 +16,7 @@ string DRAM::find_data_path()
         "../data/",
         "../../data/",
         "../../hw4/data/",
-        "../../Final_report/data/"
-    };
+        "../../Final_report/data/"};
 
     for (int i = 0; i < 5; i++)
     {
@@ -72,8 +71,8 @@ void DRAM::initialize()
 
 float DRAM::read_word(unsigned int byte_addr)
 {
-    map<unsigned int, vector<float> >::iterator best = regions.end();
-    for (map<unsigned int, vector<float> >::iterator it = regions.begin(); it != regions.end(); ++it)
+    map<unsigned int, vector<float>>::iterator best = regions.end();
+    for (map<unsigned int, vector<float>>::iterator it = regions.begin(); it != regions.end(); ++it)
     {
         if (it->first <= byte_addr)
             best = it;
@@ -91,8 +90,8 @@ float DRAM::read_word(unsigned int byte_addr)
 
 void DRAM::write_word(unsigned int byte_addr, float value)
 {
-    map<unsigned int, vector<float> >::iterator best = regions.end();
-    for (map<unsigned int, vector<float> >::iterator it = regions.begin(); it != regions.end(); ++it)
+    map<unsigned int, vector<float>>::iterator best = regions.end();
+    for (map<unsigned int, vector<float>>::iterator it = regions.begin(); it != regions.end(); ++it)
     {
         if (it->first <= byte_addr)
             best = it;
@@ -143,7 +142,10 @@ void DRAM::run()
                 rdata.write(read_word(addr + beat * step));
                 rlast.write(beat + 1u == beats);
                 rvalid.write(true);
-                do { wait(); } while (!rready.read());
+                do
+                {
+                    wait();
+                } while (!rready.read());
                 rvalid.write(false);
                 rlast.write(false);
             }
@@ -162,7 +164,10 @@ void DRAM::run()
             for (unsigned int beat = 0; beat < beats; beat++)
             {
                 wready.write(true);
-                do { wait(); } while (!wvalid.read());
+                do
+                {
+                    wait();
+                } while (!wvalid.read());
                 write_word(addr + beat * step, wdata.read());
                 bool last = wlast.read();
                 wready.write(false);
@@ -171,7 +176,10 @@ void DRAM::run()
             }
 
             bvalid.write(true);
-            do { wait(); } while (!bready.read());
+            do
+            {
+                wait();
+            } while (!bready.read());
             bvalid.write(false);
             continue;
         }

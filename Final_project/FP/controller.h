@@ -169,7 +169,10 @@ SC_MODULE(Controller)
         {
             dma_write_data.write(values[i]);
             dma_write_valid.write(true);
-            do { wait(); } while (!dma_write_ready.read());
+            do
+            {
+                wait();
+            } while (!dma_write_ready.read());
             dma_write_valid.write(false);
         }
         while (!dma_done.read())
@@ -736,11 +739,11 @@ SC_MODULE(Controller)
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             wait_for_load_ack_op(worker, OP_LOAD_WEIGHT,
                                  string("CONV layer ") + num_to_string(layer) +
-                                 " weight for PE " + num_to_string(worker));
+                                     " weight for PE " + num_to_string(worker));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
             wait_for_load_ack_op(worker, OP_LOAD_BIAS,
                                  string("CONV layer ") + num_to_string(layer) +
-                                 " bias for PE " + num_to_string(worker));
+                                     " bias for PE " + num_to_string(worker));
 
             workers.push_back(worker);
             starts.push_back(base);
@@ -893,11 +896,11 @@ SC_MODULE(Controller)
             send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
             wait_for_load_ack_op(worker, OP_LOAD_WEIGHT,
                                  string("FC layer ") + num_to_string(layer) +
-                                 " weight for PE " + num_to_string(worker));
+                                     " weight for PE " + num_to_string(worker));
             send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
             wait_for_load_ack_op(worker, OP_LOAD_BIAS,
                                  string("FC layer ") + num_to_string(layer) +
-                                 " bias for PE " + num_to_string(worker));
+                                     " bias for PE " + num_to_string(worker));
 
             workers.push_back(worker);
             starts.push_back(base);
@@ -982,8 +985,7 @@ SC_MODULE(Controller)
             "../data/imagenet_classes.txt",
             "../../data/imagenet_classes.txt",
             "../../hw4/data/imagenet_classes.txt",
-            "../../Final_report/data/imagenet_classes.txt"
-        };
+            "../../Final_report/data/imagenet_classes.txt"};
         ifstream fin;
         for (int i = 0; i < 5; i++)
         {

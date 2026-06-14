@@ -14,31 +14,39 @@ SC_MODULE(DRAM)
     sc_in<bool> clk;
     sc_in<bool> rst;
 
+    // DMA to DRAM read signals.
     sc_in<unsigned int> araddr;
     sc_in<unsigned int> arlen;
     sc_in<unsigned int> arsize;
     sc_in<bool> arvalid;
     sc_out<bool> arready;
+
+    // DRAM to DMA read data signals.
     sc_out<float> rdata;
     sc_out<bool> rvalid;
     sc_in<bool> rready;
     sc_out<bool> rlast;
 
+    // DMA to DRAM write address signals.
     sc_in<unsigned int> awaddr;
     sc_in<unsigned int> awlen;
     sc_in<unsigned int> awsize;
     sc_in<bool> awvalid;
     sc_out<bool> awready;
+
+    // DMA to DRAM write data signals.
     sc_in<float> wdata;
     sc_in<bool> wvalid;
     sc_out<bool> wready;
     sc_in<bool> wlast;
+
+    // DRAM to DMA write response signals.
     sc_out<bool> bvalid;
     sc_in<bool> bready;
 
     string DATA_PATH;
     string IMAGE_FILE_NAME;
-    map<unsigned int, vector<float> > regions;
+    map<unsigned int, vector<float>> regions;
 
     void run();
     void initialize();
