@@ -14,11 +14,12 @@ string DRAM::find_data_path()
     const char *candidates[] = {
         "./data/",
         "../data/",
+        "../../data/",
         "../../hw4/data/",
         "../../Final_report/data/"
     };
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
     {
         ifstream fin((string(candidates[i]) + "conv1_bias.txt").c_str());
         if (fin.good())

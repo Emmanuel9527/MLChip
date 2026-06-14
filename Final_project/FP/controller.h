@@ -980,11 +980,12 @@ SC_MODULE(Controller)
         const char *paths[] = {
             "data/imagenet_classes.txt",
             "../data/imagenet_classes.txt",
+            "../../data/imagenet_classes.txt",
             "../../hw4/data/imagenet_classes.txt",
             "../../Final_report/data/imagenet_classes.txt"
         };
         ifstream fin;
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 5; i++)
         {
             fin.open(paths[i]);
             if (fin.is_open())
