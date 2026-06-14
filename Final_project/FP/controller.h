@@ -26,7 +26,7 @@ extern "C" void deadlock_watchdog_report_unexpected_flit(int expected_node,
 
 SC_MODULE(Controller)
 {
-    sc_in<bool> rst;
+    sc_in<bool> reset_n;
     sc_in<bool> clk;
 
     // Controller-facing DMA command and streaming interfaces.
@@ -1076,7 +1076,7 @@ SC_MODULE(Controller)
         flit_tx.write(0);
 
         wait();
-        while (rst.read())
+        while (!reset_n.read())
             wait();
         wait();
         debug_log("Reset deasserted. Starting AlexNet schedule.");

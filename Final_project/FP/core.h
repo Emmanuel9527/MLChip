@@ -12,7 +12,7 @@ using namespace std;
 SC_MODULE(Core)
 {
     // Clock/reset and local router handshake interface.
-    sc_in<bool> rst;
+    sc_in<bool> reset_n;
     sc_in<bool> clk;
 
     // Router -> Core link. Incoming flits are deserialized into packets.
@@ -53,7 +53,7 @@ SC_MODULE(Core)
     {
         while (true)
         {
-            if (rst.read())
+            if (!reset_n.read())
             {
                 req_tx.write(false);
                 wait();
@@ -79,7 +79,7 @@ SC_MODULE(Core)
     {
         while (true)
         {
-            if (rst.read())
+            if (!reset_n.read())
             {
                 Flit zero_flit;
                 zero_flit = 0;
@@ -247,7 +247,7 @@ SC_MODULE(Core)
 
         while (true)
         {
-            if (rst.read())
+            if (!reset_n.read())
             {
                 packet = Packet();
                 packet_active = false;

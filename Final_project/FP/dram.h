@@ -12,7 +12,7 @@ using namespace std;
 SC_MODULE(DRAM)
 {
     sc_in<bool> clk;
-    sc_in<bool> rst;
+    sc_in<bool> reset_n;
 
     // DMA to DRAM read signals.
     sc_in<unsigned int> araddr;

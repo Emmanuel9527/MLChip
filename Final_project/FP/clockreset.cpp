@@ -6,7 +6,7 @@ void Clock::do_it() {
 }
 
 void Reset::do_it() {
-  rst = 1;
+  reset_n = 0;
   wait( ticks, SC_NS );
-  rst = 0;
+  reset_n = 1;
 }

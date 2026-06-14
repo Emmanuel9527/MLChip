@@ -28,12 +28,12 @@ SC_MODULE( Clock ) {
 
 SC_MODULE( Reset ) {
   public:
-    sc_out<bool> rst;
+    sc_out<bool> reset_n;
 
     SC_HAS_PROCESS(Reset);
 
     Reset( sc_module_name name, int _ticks) : 
-	       sc_module(name), rst("rst"), ticks(_ticks)
+	       sc_module(name), reset_n("reset_n"), ticks(_ticks)
     {
       SC_THREAD(do_it);
       // no sensitivity list

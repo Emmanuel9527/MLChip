@@ -47,6 +47,7 @@ searches for the data folder in this order:
 - Routers 1 through 15 are connected to worker cores and PEs.
 - HW4 PE compute behavior is preserved as the baseline.
 - ROM-based tensor loading is replaced by a DRAM model and an AXI4-like DMA.
+- All modules use an active-low `reset_n` signal.
 
 ## AXI4-like DMA Model
 
@@ -58,6 +59,11 @@ The DMA supports:
 - Write data channel: `WDATA`, `WVALID`, `WREADY`, `WLAST`
 - Write response channel: `BVALID`, `BREADY`
 - Burst transfers with up to 16 32-bit float beats per burst
+
+The DRAM slave uses an idle-ready model for the address channels: `ARREADY`
+and `AWREADY` may be asserted before the DMA asserts `ARVALID` or `AWVALID`.
+A transfer is accepted only when the corresponding `VALID` and `READY` signals
+are both high on the same clock cycle.
 
 Outstanding transactions are not implemented in this baseline.
 

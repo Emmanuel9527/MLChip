@@ -6,7 +6,7 @@
 SC_MODULE(AxiDma)
 {
     sc_in<bool> clk;
-    sc_in<bool> rst;
+    sc_in<bool> reset_n;
 
     // Simple command interface used by the Controller.
     // One command transfers cmd_len 32-bit float words starting at cmd_addr.

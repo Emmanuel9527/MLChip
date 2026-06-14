@@ -124,7 +124,7 @@ void AxiDma::run()
     read_data.write(0.0f);
     wdata.write(0.0f);
 
-    while (rst.read())
+    while (!reset_n.read())
         wait();
 
     while (true)

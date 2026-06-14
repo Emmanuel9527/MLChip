@@ -14,9 +14,9 @@ int sc_main(int argc, char* argv[])
 {
     deadlock_watchdog_clear();
 
-    // Global clock and active-high reset used by all modules.
+    // Global clock and active-low reset used by all modules.
     sc_signal < bool > clk;
-    sc_signal < bool > rst;
+    sc_signal < bool > reset_n;
 
     // Controller <-> AXI DMA command and data-stream signals.
     sc_signal < bool > dma_cmd_valid;
@@ -120,11 +120,11 @@ int sc_main(int argc, char* argv[])
 
     // Bind clock/reset generators.
     m_clock( clk );
-    m_reset( rst );
+    m_reset( reset_n );
 
     // Bind DMA to DRAM through the AXI4-like read/write channels.
     m_dram.clk( clk );
-    m_dram.rst( rst );
+    m_dram.reset_n( reset_n );
     m_dram.araddr( araddr );
     m_dram.arlen( arlen );
     m_dram.arsize( arsize );
@@ -147,7 +147,7 @@ int sc_main(int argc, char* argv[])
     m_dram.bready( bready );
 
     m_dma.clk( clk );
-    m_dma.rst( rst );
+    m_dma.reset_n( reset_n );
     m_dma.cmd_valid( dma_cmd_valid );
     m_dma.cmd_ready( dma_cmd_ready );
     m_dma.cmd_write( dma_cmd_write );
@@ -183,7 +183,7 @@ int sc_main(int argc, char* argv[])
 
     // Bind Controller to DMA and router[0] local port signals.
     m_controller.clk( clk );
-    m_controller.rst( rst );
+    m_controller.reset_n( reset_n );
     m_controller.dma_cmd_valid( dma_cmd_valid );
     m_controller.dma_cmd_ready( dma_cmd_ready );
     m_controller.dma_cmd_write( dma_cmd_write );
@@ -207,7 +207,7 @@ int sc_main(int argc, char* argv[])
     for (int i = 0; i < 16; i++)
     {
         routers[i]->clk( clk );
-        routers[i]->rst( rst );
+        routers[i]->reset_n( reset_n );
 
         if (i == 0)
         {
@@ -223,7 +223,7 @@ int sc_main(int argc, char* argv[])
         {
             // Nodes 1..15 local ports are worker Core/PE network interfaces.
             cores[i]->clk( clk );
-            cores[i]->rst( rst );
+            cores[i]->reset_n( reset_n );
             cores[i]->flit_tx( c2r_flit[i] );
             cores[i]->req_tx( c2r_req[i] );
             cores[i]->ack_tx( c2r_ack[i] );

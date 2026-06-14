@@ -81,7 +81,7 @@ SC_MODULE( Router ) {
     };
 
     // Five-port router: NORTH, SOUTH, EAST, WEST, and LOCAL.
-    sc_in  < bool >  rst;
+    sc_in  < bool >  reset_n;
     sc_in  < bool >  clk;
 
     // Output-side valid-ready links.
@@ -617,7 +617,7 @@ SC_MODULE( Router ) {
     {
         while (true)
         {
-            if (rst.read())
+            if (!reset_n.read())
             {
                 rx_current_vc[input_port] = -1;
                 release_broadcast_outputs(input_port);
@@ -770,7 +770,7 @@ SC_MODULE( Router ) {
     {
         while (true)
         {
-            if (rst.read())
+            if (!reset_n.read())
             {
                 reset_allocation_state();
                 wait();
@@ -796,7 +796,7 @@ SC_MODULE( Router ) {
     {
         while (true)
         {
-            if (rst.read())
+            if (!reset_n.read())
             {
                 Flit zero_flit;
                 zero_flit = 0;

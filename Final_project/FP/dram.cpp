@@ -41,6 +41,8 @@ void DRAM::load_region(unsigned int base, const string &filename)
     float value;
     while (fin >> value)
         values.push_back(value);
+
+    // use swap to interchange the pointers and avoid copying the whole vector.
     regions[base].swap(values);
 }
 
@@ -71,6 +73,7 @@ void DRAM::initialize()
 
 float DRAM::read_word(unsigned int byte_addr)
 {
+    // map<> is a template class in the namespace std, iterator is a nested type defined in map<> to traverse the key-value pairs.
     map<unsigned int, vector<float>>::iterator best = regions.end();
     for (map<unsigned int, vector<float>>::iterator it = regions.begin(); it != regions.end(); ++it)
     {
@@ -120,22 +123,25 @@ void DRAM::run()
     bvalid.write(false);
     rdata.write(0.0f);
 
-    while (rst.read())
+    while (!reset_n.read())
         wait();
 
     while (true)
     {
-        arready.write(false);
-        awready.write(false);
+        // The DRAM slave is idle here, so it can advertise readiness before
+        // the DMA master asserts VALID. A transfer is still accepted only on
+        // a cycle where VALID and READY are both high.
+        arready.write(true);
+        awready.write(true);
+        wait();
 
-        if (arvalid.read())
+        if (arvalid.read() && arready.read())
         {
             unsigned int addr = araddr.read();
             unsigned int beats = arlen.read() + 1u;
             unsigned int step = 1u << arsize.read();
-            arready.write(true);
-            wait();
             arready.write(false);
+            awready.write(false);
 
             for (unsigned int beat = 0; beat < beats; beat++)
             {
@@ -152,17 +158,18 @@ void DRAM::run()
             continue;
         }
 
-        if (awvalid.read())
+        if (awvalid.read() && awready.read())
         {
             unsigned int addr = awaddr.read();
             unsigned int beats = awlen.read() + 1u;
             unsigned int step = 1u << awsize.read();
-            awready.write(true);
-            wait();
+            arready.write(false);
             awready.write(false);
 
             for (unsigned int beat = 0; beat < beats; beat++)
             {
+                // WREADY is asserted when DRAM can accept a write-data beat.
+                // The beat is captured only when WVALID is also high.
                 wready.write(true);
                 do
                 {
