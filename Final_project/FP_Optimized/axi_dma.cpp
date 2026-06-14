@@ -37,6 +37,9 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
         }
 #endif
     } while (!arready.read());
+    // Keep VALID for one extra modeled clock so the DRAM thread can sample the
+    // address handshake in SystemC's cooperative scheduling model.
+    wait();
     arvalid.write(false);
 
     // Accept each read beat from DRAM, then forward it to the Controller.
@@ -105,6 +108,9 @@ void AxiDma::write_burst(unsigned int addr, unsigned int beats)
     {
         wait();
     } while (!awready.read());
+    // Keep VALID for one extra modeled clock so the DRAM thread can sample the
+    // address handshake in SystemC's cooperative scheduling model.
+    wait();
     awvalid.write(false);
 
     // Pull one word at a time from the Controller and push it to DRAM.
