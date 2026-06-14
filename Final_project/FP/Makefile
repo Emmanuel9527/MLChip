@@ -32,6 +32,10 @@ cat: $(O)
 dog: $(O)
 	IMAGE_FILE_NAME=dog.txt ./run
 
+# Run only the final DRAM output write/read/print path.
+test-writeback: $(O)
+	OUTPUT_WRITEBACK_TEST=1 IMAGE_FILE_NAME=cat.txt ./run
+
 # Rebuild with trace logs enabled, then run with cat.txt
 trace-cat:
 	$(MAKE) clean
@@ -42,8 +46,13 @@ trace-dog:
 	$(MAKE) clean
 	$(MAKE) TRACE=1 dog
 
+# Rebuild with trace logs enabled, then run only the final write-back path.
+trace-test-writeback:
+	$(MAKE) clean
+	$(MAKE) TRACE=1 test-writeback
+
 # Clean up compiled files
 clean:
 	rm -rf $(O)
 
-.PHONY: all cat dog trace-cat trace-dog clean
+.PHONY: all cat dog test-writeback trace-cat trace-dog trace-test-writeback clean

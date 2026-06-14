@@ -167,11 +167,9 @@ SC_MODULE(Controller)
 
         for (size_t i = 0; i < values.size(); i++)
         {
-            while (!dma_write_ready.read())
-                wait();
             dma_write_data.write(values[i]);
             dma_write_valid.write(true);
-            wait();
+            do { wait(); } while (!dma_write_ready.read());
             dma_write_valid.write(false);
         }
         while (!dma_done.read())
@@ -1037,6 +1035,26 @@ SC_MODULE(Controller)
         cout << "=================================================" << endl;
     }
 
+    void run_output_writeback_test()
+    {
+        cout << "[TEST] Running output write-back DMA test." << endl;
+        vector<float> test_scores(1000, 0.0f);
+        for (int i = 0; i < 1000; i++)
+            test_scores[i] = (float)(1000 - i) / 100.0f;
+
+        dma_write_vector(DRAM_OUTPUT_BASE, test_scores, "test output scores");
+        vector<float> readback = dma_read_vector(DRAM_OUTPUT_BASE, 1000, "test output scores");
+
+        cout << "[TEST] First 20 read-back scores:" << endl;
+        cout << fixed << setprecision(2);
+        for (int i = 0; i < 20; i++)
+            cout << "idx " << setw(3) << i << " = " << setw(8) << readback[i] << endl;
+
+        cout << "[TEST] Printing Top-100 from read-back DRAM output." << endl;
+        vector<double> prob = softmax(readback);
+        print_top100(readback, prob);
+    }
+
     // Main Controller schedule:
     // read DRAM tensors through AXI DMA, partition each layer into PE jobs, collect results,
     // and advance through the AlexNet layer order.
@@ -1060,6 +1078,14 @@ SC_MODULE(Controller)
             wait();
         wait();
         debug_log("Reset deasserted. Starting AlexNet schedule.");
+
+        const char *writeback_test = getenv("OUTPUT_WRITEBACK_TEST");
+        if (writeback_test != NULL && string(writeback_test) == "1")
+        {
+            run_output_writeback_test();
+            sc_stop();
+            return;
+        }
 
         // Input image -> zero padding.
         vector<float> feature = read_dram_tensor(0, false, IMG_H * IMG_W * IMG_C);

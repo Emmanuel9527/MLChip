@@ -42,11 +42,10 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
 void AxiDma::write_burst(unsigned int addr, unsigned int beats)
 {
 #if defined(FP_TRACE)
-    if (write_bursts < 4 || ((write_bursts + 1) % 100000 == 0))
-        cout << "[TRACE] DMA write burst #" << (write_bursts + 1)
-             << " addr=0x" << hex << addr << dec
-             << ", beats=" << beats
-             << ", total_write_words=" << write_words << endl;
+    cout << "[TRACE] DMA write burst #" << (write_bursts + 1)
+         << " addr=0x" << hex << addr << dec
+         << ", beats=" << beats
+         << ", total_write_words=" << write_words << endl;
 #endif
     awaddr.write(addr);
     awlen.write(beats - 1u);
@@ -61,21 +60,18 @@ void AxiDma::write_burst(unsigned int addr, unsigned int beats)
         do { wait(); } while (!write_valid.read());
         float value = write_data.read();
         write_ready.write(false);
-        while (!wready.read())
-            wait();
+
         wdata.write(value);
         wlast.write(i + 1u == beats);
         wvalid.write(true);
-        wait();
+        do { wait(); } while (!wready.read());
         wvalid.write(false);
         wlast.write(false);
         write_words++;
     }
 
-    while (!bvalid.read())
-        wait();
     bready.write(true);
-    wait();
+    do { wait(); } while (!bvalid.read());
     bready.write(false);
     write_bursts++;
 }
@@ -124,6 +120,11 @@ void AxiDma::run()
             remaining -= beats;
         }
 
+#if defined(FP_TRACE)
+        if (is_write)
+            cout << "[TRACE] DMA write command done, total_write_words="
+                 << write_words << ", total_write_bursts=" << write_bursts << endl;
+#endif
         done.write(true);
         wait();
         done.write(false);

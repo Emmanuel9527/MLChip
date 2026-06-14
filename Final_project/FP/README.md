@@ -24,6 +24,13 @@ make clean
 make TRACE=1 cat
 ```
 
+To test only the final output write-back path without running the full CNN,
+use:
+
+```sh
+make trace-test-writeback
+```
+
 The program reads `IMAGE_FILE_NAME` from the Makefile target. The DRAM model
 searches for the data folder in this order:
 
