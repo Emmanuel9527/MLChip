@@ -6,13 +6,23 @@ RPATH = -Wl,-rpath,$(HOME)/systemc-2.3.3/lib-linux64
 
 O = run
 C = *.cpp
+CXX ?= g++
+TRACE ?= 0
+TRACE_FLAGS =
+
+ifeq ($(TRACE),1)
+TRACE_FLAGS += -DFP_TRACE
+endif
+
+CXXFLAGS += -I . -I $(INC_DIR) -g $(TRACE_FLAGS)
+LDFLAGS += -L . -L $(LIB_DIR) $(RPATH)
 
 # Default target
 all: $(O)
 
 # Compile and link
 $(O): $(C)
-	g++ -I . -I  $(INC_DIR) -L . -L $(LIB_DIR) -o $(O) $(C) $(LIB) $(RPATH) -g
+	$(CXX) $(CXXFLAGS) -o $(O) $(C) $(LDFLAGS) $(LIB)
 
 # Run with cat.txt
 cat: $(O)
@@ -22,6 +32,18 @@ cat: $(O)
 dog: $(O)
 	IMAGE_FILE_NAME=dog.txt ./run
 
+# Rebuild with trace logs enabled, then run with cat.txt
+trace-cat:
+	$(MAKE) clean
+	$(MAKE) TRACE=1 cat
+
+# Rebuild with trace logs enabled, then run with dog.txt
+trace-dog:
+	$(MAKE) clean
+	$(MAKE) TRACE=1 dog
+
 # Clean up compiled files
 clean:
 	rm -rf $(O)
+
+.PHONY: all cat dog trace-cat trace-dog clean

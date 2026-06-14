@@ -9,6 +9,21 @@ make cat
 make dog
 ```
 
+Trace logs are disabled by default for submission. To rebuild and run with
+progress logs on the screen, use:
+
+```sh
+make trace-cat
+make trace-dog
+```
+
+The equivalent manual form is:
+
+```sh
+make clean
+make TRACE=1 cat
+```
+
 The program reads `IMAGE_FILE_NAME` from the Makefile target. The DRAM model
 searches for the data folder in this order:
 

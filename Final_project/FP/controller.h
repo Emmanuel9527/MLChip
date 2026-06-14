@@ -82,7 +82,9 @@ SC_MODULE(Controller)
 
     void debug_log(const string &msg)
     {
-#ifdef DEBUG
+#if defined(FP_TRACE)
+        cout << "[TRACE] " << msg << endl;
+#elif defined(DEBUG)
         cout << "[DEBUG] " << msg << endl;
 #else
         (void)msg;
@@ -212,7 +214,7 @@ SC_MODULE(Controller)
         int payload_flits =
             (packet.datas.size() + PACKED_FLIT_WORDS - 1) / PACKED_FLIT_WORDS;
         bool report_progress = false;
-#ifdef DEBUG
+#if defined(DEBUG) || defined(FP_TRACE)
         report_progress = payload_flits >= PACKET_PROGRESS_FLITS;
 #endif
         int sent_payload_flits = 0;
@@ -358,7 +360,7 @@ SC_MODULE(Controller)
                 if (unexpected_flits <= UNEXPECTED_FLIT_LOG_LIMIT ||
                     unexpected_flits % UNEXPECTED_FLIT_LOG_INTERVAL == 0)
                 {
-#ifdef DEBUG
+#if defined(DEBUG) || defined(FP_TRACE)
                     deadlock_watchdog_report_unexpected_flit(0,
                                                              type,
                                                              get_flit_word(flit, 0),

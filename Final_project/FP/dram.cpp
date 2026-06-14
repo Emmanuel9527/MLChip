@@ -47,6 +47,10 @@ void DRAM::load_region(unsigned int base, const string &filename)
 
 void DRAM::initialize()
 {
+#if defined(FP_TRACE)
+    cout << "[TRACE] DRAM data path: " << DATA_PATH
+         << ", image: " << IMAGE_FILE_NAME << endl;
+#endif
     load_region(DRAM_INPUT_BASE, IMAGE_FILE_NAME);
     for (int layer = 1; layer <= 5; layer++)
     {

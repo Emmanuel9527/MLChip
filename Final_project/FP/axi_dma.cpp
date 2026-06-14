@@ -9,6 +9,13 @@ static const unsigned int AXI_FLOAT_SIZE_LOG2 = 2;
 
 void AxiDma::read_burst(unsigned int addr, unsigned int beats)
 {
+#if defined(FP_TRACE)
+    if (read_bursts < 4 || ((read_bursts + 1) % 100000 == 0))
+        cout << "[TRACE] DMA read burst #" << (read_bursts + 1)
+             << " addr=0x" << hex << addr << dec
+             << ", beats=" << beats
+             << ", total_read_words=" << read_words << endl;
+#endif
     araddr.write(addr);
     arlen.write(beats - 1u);
     arsize.write(AXI_FLOAT_SIZE_LOG2);
@@ -34,6 +41,13 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
 
 void AxiDma::write_burst(unsigned int addr, unsigned int beats)
 {
+#if defined(FP_TRACE)
+    if (write_bursts < 4 || ((write_bursts + 1) % 100000 == 0))
+        cout << "[TRACE] DMA write burst #" << (write_bursts + 1)
+             << " addr=0x" << hex << addr << dec
+             << ", beats=" << beats
+             << ", total_write_words=" << write_words << endl;
+#endif
     awaddr.write(addr);
     awlen.write(beats - 1u);
     awsize.write(AXI_FLOAT_SIZE_LOG2);
