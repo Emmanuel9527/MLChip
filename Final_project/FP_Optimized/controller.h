@@ -74,7 +74,7 @@ SC_MODULE(Controller)
     static const int WATCHDOG_IDLE_LOG_INTERVALS = 10;
     static const int UNEXPECTED_FLIT_LOG_LIMIT = 5;
     static const int UNEXPECTED_FLIT_LOG_INTERVAL = 1000;
-    static const int DMA_PROGRESS_INTERVAL = 1000000;
+    static const int DMA_PROGRESS_INTERVAL = 65536;
     static const int PACKET_PROGRESS_FLITS = 50000;
 
     // Monotonic id used to label jobs sent to PEs.
