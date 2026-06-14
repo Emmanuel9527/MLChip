@@ -12,6 +12,10 @@ using namespace std;
 SC_MODULE(PeLocalSram)
 {
     static const unsigned int DATA_WIDTH_BITS = 32;
+    static const unsigned int CAPACITY_BYTES = 64 * 1024;
+    static const unsigned int CAPACITY_WORDS = CAPACITY_BYTES / 4;
+    static const unsigned int INPUT_BANKS = 16;
+    static const unsigned int WEIGHT_BANKS = 16;
     static const unsigned int READ_LATENCY_CYCLES = 1;
     static const unsigned int WRITE_LATENCY_CYCLES = 1;
 

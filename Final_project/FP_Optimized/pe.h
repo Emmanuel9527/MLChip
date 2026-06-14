@@ -34,12 +34,14 @@ enum PeOp
     OP_LOAD_ACK = 7,
     OP_SYSTOLIC_FC_INIT = 8,
     OP_SYSTOLIC_FC_ACCUM = 9,
-    OP_SYSTOLIC_FC_FINISH = 10
+    OP_SYSTOLIC_FC_FINISH = 10,
+    OP_SYSTOLIC_MVM_ACCUM = 11,
+    OP_SYSTOLIC_BCAST_INPUT = 12
 };
 
 SC_MODULE(PE)
 {
-    static const int MACS_PER_CYCLE = 1024;
+    static const int MACS_PER_CYCLE = 16;
 
     // PE id matches the local router/core id in the 4x4 mesh.
     int id;
@@ -93,6 +95,8 @@ SC_MODULE(PE)
             local_sram.load_bias(load_payload(job));
             return make_load_ack(job);
         }
+        if (op == OP_SYSTOLIC_BCAST_INPUT)
+            return run_systolic_bcast_input(job);
         if (op == OP_COMPUTE_CONV)
             return run_conv(job);
         if (op == OP_COMPUTE_POOL)
@@ -105,6 +109,8 @@ SC_MODULE(PE)
             return run_systolic_fc_accum(job);
         if (op == OP_SYSTOLIC_FC_FINISH)
             return run_systolic_fc_finish(job);
+        if (op == OP_SYSTOLIC_MVM_ACCUM)
+            return run_systolic_mvm_accum(job);
         return NULL;
     }
 
@@ -126,6 +132,31 @@ SC_MODULE(PE)
         result->datas.push_back(job.datas[0]);
         result->datas.push_back(job.datas[1]);
         return result;
+    }
+
+    // Systolic input broadcast for the lecture MVM map:
+    // [op, layer_id, active_cols, payload_size, payload...]
+    // The input vector segment b(j) flows horizontally from left to right
+    // across the active columns in one PE row.
+    Packet *run_systolic_bcast_input(const Packet &job)
+    {
+        int active_cols = (int)job.datas[2];
+        int payload_size = (int)job.datas[3];
+        vector<float> payload(job.datas.begin() + 4,
+                              job.datas.begin() + 4 + payload_size);
+        local_sram.load_input(payload);
+
+        int col = id % 4;
+        if (col + 1 < active_cols)
+        {
+            Packet *forward = new Packet();
+            forward->source_id = job.source_id;
+            forward->dest_id = id + 1;
+            forward->datas = job.datas;
+            return forward;
+        }
+
+        return make_load_ack(job);
     }
 
     // Create a result packet addressed back to the original sender.
@@ -374,6 +405,54 @@ SC_MODULE(PE)
         Packet *result = make_result(job, job_id);
         result->datas.push_back((float)systolic_out_index);
         result->datas.push_back(nonlinear.relu((float)value, apply_relu));
+        return result;
+    }
+
+    // Lecture-style systolic MVM accumulate:
+    // [op, job_id, output_index, controller_id, apply_relu_on_top_edge, psum_in]
+    // Each PE consumes its local input/weight segment, adds to psum_in, and
+    // forwards the updated partial sum to the PE on its north side. The top
+    // boundary PE returns the output value to the Controller.
+    Packet *run_systolic_mvm_accum(const Packet &job)
+    {
+        const vector<float> &d = job.datas;
+        int job_id = (int)d[1];
+        int output_index = (int)d[2];
+        int controller_id = (int)d[3];
+        bool apply_relu = ((int)d[4] != 0);
+        double psum = (double)d[5];
+
+        unsigned int words = local_sram.input_size();
+        if (words > local_sram.weight_size())
+            words = local_sram.weight_size();
+        wait_for_macs(words);
+
+        for (unsigned int i = 0; i < words; i++)
+            psum += (double)local_sram.read_input(i) *
+                    (double)local_sram.read_weight(i);
+
+        int row = id / 4;
+        Packet *result = new Packet();
+        result->source_id = id;
+
+        if (row > 0)
+        {
+            result->dest_id = id - 4;
+            result->datas.push_back((float)OP_SYSTOLIC_MVM_ACCUM);
+            result->datas.push_back((float)job_id);
+            result->datas.push_back((float)output_index);
+            result->datas.push_back((float)controller_id);
+            result->datas.push_back(apply_relu ? 1.0f : 0.0f);
+            result->datas.push_back((float)psum);
+        }
+        else
+        {
+            result->dest_id = controller_id;
+            result->datas.push_back((float)job_id);
+            result->datas.push_back((float)output_index);
+            result->datas.push_back(nonlinear.relu((float)psum, apply_relu));
+        }
+
         return result;
     }
 

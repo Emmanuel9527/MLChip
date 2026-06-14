@@ -90,7 +90,7 @@ SC_MODULE(Controller)
     unsigned long long optimized_systolic_mac_ops;
     unsigned long long optimized_systolic_tiles;
 
-    static const unsigned int SRAM_CAPACITY_WORDS = 10485760;
+    static const unsigned int SRAM_CAPACITY_WORDS = 2097152;
     static const unsigned int SRAM_FC_INPUT_BASE = 0;
     static const unsigned int SRAM_FC_WEIGHT_TILE_BASE = 65536;
     static const unsigned int SRAM_FC_BIAS_TILE_BASE = 131072;
@@ -98,6 +98,7 @@ SC_MODULE(Controller)
     static const unsigned int SRAM_FC_OUTPUT_BASE = 262144;
     static const int SYSTOLIC_ARRAY_ROWS = 4;
     static const int SYSTOLIC_ARRAY_COLS = 4;
+    static const int PE_MACS_PER_CYCLE = 16;
     static const int SYSTOLIC_INPUT_TILE_WORDS = 4096;
 
     void debug_log(const string &msg)
@@ -471,7 +472,8 @@ SC_MODULE(Controller)
         int ack_op = (int)packet.datas[1];
         if (ack_op != OP_LOAD_INPUT &&
             ack_op != OP_LOAD_WEIGHT &&
-            ack_op != OP_LOAD_BIAS)
+            ack_op != OP_LOAD_BIAS &&
+            ack_op != OP_SYSTOLIC_BCAST_INPUT)
             return false;
         return expected_source < 0 || packet.source_id == expected_source;
     }
@@ -686,6 +688,25 @@ SC_MODULE(Controller)
         return packet;
     }
 
+    // Build a lecture-style MVM input packet. The west PE in one row loads
+    // this b-vector segment and forwards it horizontally to the active columns.
+    // Layout: [op, layer_id, active_cols, payload_size, payload...]
+    Packet make_systolic_bcast_input(int dest,
+                                     int layer,
+                                     int active_cols,
+                                     const vector<float> &payload)
+    {
+        Packet packet;
+        packet.source_id = CONTROLLER_ID;
+        packet.dest_id = dest;
+        packet.datas.push_back((float)OP_SYSTOLIC_BCAST_INPUT);
+        packet.datas.push_back((float)layer);
+        packet.datas.push_back((float)active_cols);
+        packet.datas.push_back((float)payload.size());
+        append_vector(packet.datas, payload);
+        return packet;
+    }
+
     // Broadcast one activation/input tensor to every worker PE.
     // The router implements this as a spanning-tree multicast, so Controller
     // injects one packet instead of unicasting the same tensor to each PE.
@@ -793,6 +814,24 @@ SC_MODULE(Controller)
         packet.datas.push_back((float)OP_SYSTOLIC_FC_FINISH);
         packet.datas.push_back((float)job_id);
         packet.datas.push_back(apply_relu ? 1.0f : 0.0f);
+        return packet;
+    }
+
+    Packet make_systolic_mvm_accum(int dest,
+                                   int job_id,
+                                   int output_index,
+                                   bool apply_relu,
+                                   float psum_in)
+    {
+        Packet packet;
+        packet.source_id = CONTROLLER_ID;
+        packet.dest_id = dest;
+        packet.datas.push_back((float)OP_SYSTOLIC_MVM_ACCUM);
+        packet.datas.push_back((float)job_id);
+        packet.datas.push_back((float)output_index);
+        packet.datas.push_back((float)CONTROLLER_ID);
+        packet.datas.push_back(apply_relu ? 1.0f : 0.0f);
+        packet.datas.push_back(psum_in);
         return packet;
     }
 
@@ -976,7 +1015,7 @@ SC_MODULE(Controller)
         return output;
     }
 
-    // Run one fully connected layer through worker PEs.
+    // Run one fully connected layer through the lecture-style MVM systolic map.
     vector<float> run_fc_on_pes(const vector<float> &feature,
                                 int layer, int out_size, bool apply_relu)
     {
@@ -990,34 +1029,25 @@ SC_MODULE(Controller)
         sram_write_only(SRAM_FC_INPUT_BASE, feature,
                         string("FC layer ") + num_to_string(layer) + " input activation");
 
-        for (int out_base = 0; out_base < out_size; out_base += WORKER_COUNT)
+        for (int out_base = 0; out_base < out_size; out_base += SYSTOLIC_ARRAY_COLS)
         {
-            int active_pes = min(WORKER_COUNT, out_size - out_base);
+            int active_cols = min(SYSTOLIC_ARRAY_COLS, out_size - out_base);
 
             unsigned int bias_addr = dram_bias_base(layer) + (unsigned int)out_base * 4u;
             vector<float> bias_dma =
-                dma_read_vector(bias_addr, active_pes,
+                dma_read_vector(bias_addr, active_cols,
                                 string("FC layer ") + num_to_string(layer) +
-                                    " systolic bias rows [" +
+                                    " systolic column bias [" +
                                     num_to_string(out_base) + ", " +
-                                    num_to_string(out_base + active_pes - 1) + "]");
+                                    num_to_string(out_base + active_cols - 1) + "]");
             vector<float> bias_tile =
                 sram_stage_block(SRAM_FC_BIAS_TILE_BASE, bias_dma,
                                  string("FC layer ") + num_to_string(layer) +
                                      " bias tile");
 
-            vector<float> psum_tile(active_pes, 0.0f);
-            for (int pe = 0; pe < active_pes; pe++)
-            {
-                int job_id = next_job_id++;
-                int output_index = out_base + pe;
-                send_packet(make_systolic_fc_init(pe, job_id,
-                                                  output_index,
-                                                  bias_tile[pe]));
-                Packet ack = receive_specific_packet(job_id, pe);
-                (void)ack;
-                psum_tile[pe] = bias_tile[pe];
-            }
+            vector<float> psum_tile(active_cols, 0.0f);
+            for (int col = 0; col < active_cols; col++)
+                psum_tile[col] = bias_tile[col];
             sram_write_only(SRAM_FC_PSUM_BASE, psum_tile,
                             string("FC layer ") + num_to_string(layer) +
                                 " initial partial sums");
@@ -1026,59 +1056,98 @@ SC_MODULE(Controller)
                  input_base += SYSTOLIC_INPUT_TILE_WORDS)
             {
                 int tile_words = min(SYSTOLIC_INPUT_TILE_WORDS, in_size - input_base);
-                vector<float> input_tile =
-                    sram_read_only(SRAM_FC_INPUT_BASE + (unsigned int)input_base,
-                                   tile_words,
-                                   string("FC layer ") + num_to_string(layer) +
-                                       " input tile");
 
-                // The same activation tile is broadcast to every PE in the
-                // physical 4x4 array. Each PE keeps a local input buffer.
-                broadcast_input_to_workers(layer, input_tile);
-
-                for (int pe = 0; pe < active_pes; pe++)
+                for (int data_row = 0; data_row < SYSTOLIC_ARRAY_ROWS; data_row++)
                 {
-                    unsigned int weight_addr =
-                        dram_weight_base(layer) +
-                        ((unsigned int)(out_base + pe) * (unsigned int)in_size +
-                         (unsigned int)input_base) *
-                            4u;
-                    vector<float> row_weight =
-                        dma_read_vector(weight_addr, tile_words,
-                                        string("FC layer ") + num_to_string(layer) +
-                                            " systolic weight row " +
-                                            num_to_string(out_base + pe));
-                    vector<float> staged_weight =
-                        sram_stage_block(SRAM_FC_WEIGHT_TILE_BASE +
-                                             (unsigned int)pe * SYSTOLIC_INPUT_TILE_WORDS,
-                                         row_weight,
-                                         string("FC layer ") + num_to_string(layer) +
-                                             " PE " + num_to_string(pe) +
-                                             " weight tile");
-                    send_packet(make_load_packet(pe, OP_LOAD_WEIGHT, layer, staged_weight));
-                    wait_for_load_ack_op(pe, OP_LOAD_WEIGHT,
-                                         string("FC layer ") + num_to_string(layer) +
-                                             " systolic weight for PE " +
-                                             num_to_string(pe));
+                    int seg_start = (tile_words * data_row) / SYSTOLIC_ARRAY_ROWS;
+                    int seg_end = (tile_words * (data_row + 1)) / SYSTOLIC_ARRAY_ROWS;
+                    int seg_words = seg_end - seg_start;
+                    int global_input_start = input_base + seg_start;
+                    int physical_row = SYSTOLIC_ARRAY_ROWS - 1 - data_row;
+                    int west_pe = physical_row * SYSTOLIC_ARRAY_COLS;
+                    int last_active_pe = west_pe + active_cols - 1;
+
+                    vector<float> input_segment =
+                        sram_read_only(SRAM_FC_INPUT_BASE +
+                                           (unsigned int)global_input_start,
+                                       seg_words,
+                                       string("FC layer ") + num_to_string(layer) +
+                                           " data row " +
+                                           num_to_string(data_row) +
+                                           " horizontal input segment");
+                    send_packet(make_systolic_bcast_input(west_pe, layer,
+                                                          active_cols,
+                                                          input_segment));
+                    wait_for_load_ack_op(last_active_pe, OP_SYSTOLIC_BCAST_INPUT,
+                                         string("FC layer ") +
+                                             num_to_string(layer) +
+                                             " horizontal input row " +
+                                             num_to_string(data_row));
+
+                    for (int col = 0; col < active_cols; col++)
+                    {
+                        int output_index = out_base + col;
+                        int pe = physical_row * SYSTOLIC_ARRAY_COLS + col;
+
+                        unsigned int weight_addr =
+                            dram_weight_base(layer) +
+                            ((unsigned int)output_index * (unsigned int)in_size +
+                             (unsigned int)global_input_start) *
+                                4u;
+                        vector<float> weight_segment =
+                            dma_read_vector(weight_addr, seg_words,
+                                            string("FC layer ") +
+                                                num_to_string(layer) +
+                                                " systolic weight output " +
+                                                num_to_string(output_index) +
+                                                " PE " + num_to_string(pe));
+                        vector<float> staged_weight =
+                            sram_stage_block(SRAM_FC_WEIGHT_TILE_BASE +
+                                                 (unsigned int)pe *
+                                                     SYSTOLIC_INPUT_TILE_WORDS,
+                                             weight_segment,
+                                             string("FC layer ") +
+                                                 num_to_string(layer) +
+                                                 " PE " + num_to_string(pe) +
+                                                 " weight segment");
+                        send_packet(make_load_packet(pe, OP_LOAD_WEIGHT, layer,
+                                                     staged_weight));
+                        wait_for_load_ack_op(pe, OP_LOAD_WEIGHT,
+                                             string("FC layer ") +
+                                                 num_to_string(layer) +
+                                                 " systolic weight for PE " +
+                                                 num_to_string(pe));
+                    }
                 }
 
-                vector<int> accum_job_ids(active_pes, 0);
-                for (int pe = 0; pe < active_pes; pe++)
+                vector<int> col_job_ids(active_cols, 0);
+                bool apply_relu_this_tile =
+                    apply_relu && (input_base + tile_words >= in_size);
+                for (int col = 0; col < active_cols; col++)
                 {
                     int job_id = next_job_id++;
-                    accum_job_ids[pe] = job_id;
-                    send_packet(make_systolic_fc_accum(pe, job_id, tile_words));
+                    col_job_ids[col] = job_id;
+                    int bottom_pe =
+                        (SYSTOLIC_ARRAY_ROWS - 1) * SYSTOLIC_ARRAY_COLS + col;
+                    send_packet(make_systolic_mvm_accum(bottom_pe, job_id,
+                                                        out_base + col,
+                                                        apply_relu_this_tile,
+                                                        psum_tile[col]));
                 }
-                for (int pe = 0; pe < active_pes; pe++)
+                for (int col = 0; col < active_cols; col++)
                 {
-                    Packet ack = receive_specific_packet(accum_job_ids[pe], pe);
+                    int top_pe = col;
+                    Packet result =
+                        receive_specific_packet(col_job_ids[col], top_pe);
+                    if (result.datas.size() > 2)
+                        psum_tile[col] = result.datas[2];
                     optimized_systolic_mac_ops += tile_words;
-                    if (ack.datas.size() > 3)
-                        psum_tile[pe] = ack.datas[3];
                 }
 
                 unsigned int systolic_cycles =
-                    (tile_words + SYSTOLIC_ARRAY_COLS - 1) / SYSTOLIC_ARRAY_COLS +
+                    (tile_words +
+                     PE_MACS_PER_CYCLE * SYSTOLIC_ARRAY_ROWS - 1) /
+                        (PE_MACS_PER_CYCLE * SYSTOLIC_ARRAY_ROWS) +
                     SYSTOLIC_ARRAY_ROWS + SYSTOLIC_ARRAY_COLS - 2;
                 optimized_systolic_tiles++;
                 wait_systolic_cycles(systolic_cycles);
@@ -1088,21 +1157,9 @@ SC_MODULE(Controller)
                                     " updated partial sums");
             }
 
-            vector<float> output_tile(active_pes, 0.0f);
-            vector<int> finish_job_ids(active_pes, 0);
-            for (int pe = 0; pe < active_pes; pe++)
-            {
-                int job_id = next_job_id++;
-                finish_job_ids[pe] = job_id;
-                send_packet(make_systolic_fc_finish(pe, job_id, apply_relu));
-            }
-            for (int pe = 0; pe < active_pes; pe++)
-            {
-                Packet result = receive_specific_packet(finish_job_ids[pe], pe);
-                int output_index = (int)result.datas[1];
-                float value = result.datas[2];
-                output_tile[output_index - out_base] = value;
-            }
+            vector<float> output_tile(active_cols, 0.0f);
+            for (int col = 0; col < active_cols; col++)
+                output_tile[col] = psum_tile[col];
 
             sram_write_only(SRAM_FC_OUTPUT_BASE + (unsigned int)out_base,
                             output_tile,
@@ -1110,11 +1167,11 @@ SC_MODULE(Controller)
                                 " output tile");
             vector<float> committed_tile =
                 sram_read_only(SRAM_FC_OUTPUT_BASE + (unsigned int)out_base,
-                               active_pes,
+                               active_cols,
                                string("FC layer ") + num_to_string(layer) +
                                    " committed output tile");
-            for (int pe = 0; pe < active_pes; pe++)
-                output[out_base + pe] = committed_tile[pe];
+            for (int col = 0; col < active_cols; col++)
+                output[out_base + col] = committed_tile[col];
         }
 
         debug_log(string("Finished PE-based systolic FC layer ") + num_to_string(layer) + ".");
@@ -1215,7 +1272,8 @@ SC_MODULE(Controller)
         unsigned long long max_macs =
             optimized_systolic_wait_cycles *
             (unsigned long long)SYSTOLIC_ARRAY_ROWS *
-            (unsigned long long)SYSTOLIC_ARRAY_COLS;
+            (unsigned long long)SYSTOLIC_ARRAY_COLS *
+            (unsigned long long)PE_MACS_PER_CYCLE;
         double utilization = (max_macs == 0)
                                  ? 0.0
                                  : (double)optimized_systolic_mac_ops * 100.0 /
