@@ -112,6 +112,15 @@ SC_MODULE(Controller)
 #endif
     }
 
+    void progress_log(const string &msg)
+    {
+#if defined(FP_TRACE)
+        cout << "[TRACE] " << msg << endl;
+#else
+        (void)msg;
+#endif
+    }
+
     void set_wait_context(const string &context)
     {
         wait_context = context;
@@ -148,12 +157,17 @@ SC_MODULE(Controller)
         dma_cmd_valid.write(false);
     }
 
-    vector<float> dma_read_vector(unsigned int addr, int expected, const string &name)
+    vector<float> dma_read_vector(unsigned int addr,
+                                  int expected,
+                                  const string &name,
+                                  bool quiet_detail = false)
     {
         vector<float> values;
         values.reserve(expected);
         optimized_dram_read_words += expected;
-        debug_log(string("DMA read request: ") + name + ", words=" + num_to_string(expected) + ".");
+        if (!quiet_detail)
+            debug_log(string("DMA read request: ") + name +
+                      ", words=" + num_to_string(expected) + ".");
         start_dma_command(false, addr, (unsigned int)expected);
 
         while ((int)values.size() < expected)
@@ -176,8 +190,9 @@ SC_MODULE(Controller)
         while (!dma_done.read())
             wait();
 
-        debug_log(string("Finished DMA read: ") + name + ", " +
-                  num_to_string(values.size()) + " values.");
+        if (!quiet_detail)
+            debug_log(string("Finished DMA read: ") + name + ", " +
+                      num_to_string(values.size()) + " values.");
         return values;
     }
 
@@ -226,38 +241,45 @@ SC_MODULE(Controller)
 
     vector<float> sram_stage_block(unsigned int sram_addr,
                                    const vector<float> &data,
-                                   const string &name)
+                                   const string &name,
+                                   bool quiet_detail = false)
     {
-        debug_log(string("SRAM stage write: ") + name +
-                  ", words=" + num_to_string(data.size()) + ".");
+        if (!quiet_detail)
+            debug_log(string("SRAM stage write: ") + name +
+                      ", words=" + num_to_string(data.size()) + ".");
         wait_sram_cycles(global_sram.write_block(sram_addr, data));
 
         vector<float> out;
         wait_sram_cycles(global_sram.read_block(sram_addr,
                                                 (unsigned int)data.size(),
                                                 out));
-        debug_log(string("SRAM stage read: ") + name +
-                  ", words=" + num_to_string(out.size()) + ".");
+        if (!quiet_detail)
+            debug_log(string("SRAM stage read: ") + name +
+                      ", words=" + num_to_string(out.size()) + ".");
         return out;
     }
 
     void sram_write_only(unsigned int sram_addr,
                          const vector<float> &data,
-                         const string &name)
+                         const string &name,
+                         bool quiet_detail = false)
     {
-        debug_log(string("SRAM write: ") + name +
-                  ", words=" + num_to_string(data.size()) + ".");
+        if (!quiet_detail)
+            debug_log(string("SRAM write: ") + name +
+                      ", words=" + num_to_string(data.size()) + ".");
         wait_sram_cycles(global_sram.write_block(sram_addr, data));
     }
 
     vector<float> sram_read_only(unsigned int sram_addr,
                                  unsigned int words,
-                                 const string &name)
+                                 const string &name,
+                                 bool quiet_detail = false)
     {
         vector<float> out;
         wait_sram_cycles(global_sram.read_block(sram_addr, words, out));
-        debug_log(string("SRAM read: ") + name +
-                  ", words=" + num_to_string(out.size()) + ".");
+        if (!quiet_detail)
+            debug_log(string("SRAM read: ") + name +
+                      ", words=" + num_to_string(out.size()) + ".");
         return out;
     }
 
@@ -562,7 +584,10 @@ SC_MODULE(Controller)
         wait_for_load_acks(expected, label, -1);
     }
 
-    void wait_for_load_ack_op(int expected_source, int expected_op, const string &label)
+    void wait_for_load_ack_op(int expected_source,
+                              int expected_op,
+                              const string &label,
+                              bool quiet_detail = false)
     {
         set_wait_context(label + " ACK");
         while (true)
@@ -572,9 +597,11 @@ SC_MODULE(Controller)
                 if (packet_is_load_ack_op(pending_packets[i], expected_source, expected_op))
                 {
                     Packet ack = take_pending_packet(i);
-                    debug_log(string("Received ") + label + " ACK from PE " +
-                              num_to_string(ack.source_id) +
-                              ", original op " + num_to_string((int)ack.datas[1]) + ".");
+                    if (!quiet_detail)
+                        debug_log(string("Received ") + label + " ACK from PE " +
+                                  num_to_string(ack.source_id) +
+                                  ", original op " +
+                                  num_to_string((int)ack.datas[1]) + ".");
                     return;
                 }
             }
@@ -582,9 +609,11 @@ SC_MODULE(Controller)
             Packet packet = receive_packet();
             if (packet_is_load_ack_op(packet, expected_source, expected_op))
             {
-                debug_log(string("Received ") + label + " ACK from PE " +
-                          num_to_string(packet.source_id) +
-                          ", original op " + num_to_string((int)packet.datas[1]) + ".");
+                if (!quiet_detail)
+                    debug_log(string("Received ") + label + " ACK from PE " +
+                              num_to_string(packet.source_id) +
+                              ", original op " +
+                              num_to_string((int)packet.datas[1]) + ".");
                 return;
             }
 
@@ -1042,18 +1071,21 @@ SC_MODULE(Controller)
                                 string("FC layer ") + num_to_string(layer) +
                                     " systolic column bias [" +
                                     num_to_string(out_base) + ", " +
-                                    num_to_string(out_base + active_cols - 1) + "]");
+                                    num_to_string(out_base + active_cols - 1) + "]",
+                                true);
             vector<float> bias_tile =
                 sram_stage_block(SRAM_FC_BIAS_TILE_BASE, bias_dma,
                                  string("FC layer ") + num_to_string(layer) +
-                                     " bias tile");
+                                     " bias tile",
+                                 true);
 
             vector<float> psum_tile(active_cols, 0.0f);
             for (int col = 0; col < active_cols; col++)
                 psum_tile[col] = bias_tile[col];
             sram_write_only(SRAM_FC_PSUM_BASE, psum_tile,
                             string("FC layer ") + num_to_string(layer) +
-                                " initial partial sums");
+                                " initial partial sums",
+                            true);
 
             for (int input_base = 0; input_base < in_size;
                  input_base += SYSTOLIC_INPUT_TILE_WORDS)
@@ -1080,7 +1112,8 @@ SC_MODULE(Controller)
                                        string("FC layer ") + num_to_string(layer) +
                                            " data row " +
                                            num_to_string(data_row) +
-                                           " horizontal input segment");
+                                           " horizontal input segment",
+                                       true);
                     send_packet(make_systolic_bcast_input(west_pe, layer,
                                                           active_cols,
                                                           input_segment));
@@ -1088,7 +1121,8 @@ SC_MODULE(Controller)
                                          string("FC layer ") +
                                              num_to_string(layer) +
                                              " horizontal input row " +
-                                             num_to_string(data_row));
+                                             num_to_string(data_row),
+                                         true);
 
                     for (int col = 0; col < active_cols; col++)
                     {
@@ -1106,7 +1140,8 @@ SC_MODULE(Controller)
                                                 num_to_string(layer) +
                                                 " systolic weight output " +
                                                 num_to_string(output_index) +
-                                                " PE " + num_to_string(pe));
+                                                " PE " + num_to_string(pe),
+                                            true);
                         vector<float> staged_weight =
                             sram_stage_block(SRAM_FC_WEIGHT_TILE_BASE +
                                                  (unsigned int)pe *
@@ -1115,14 +1150,16 @@ SC_MODULE(Controller)
                                              string("FC layer ") +
                                                  num_to_string(layer) +
                                                  " PE " + num_to_string(pe) +
-                                                 " weight segment");
+                                                 " weight segment",
+                                             true);
                         send_packet(make_load_packet(pe, OP_LOAD_WEIGHT, layer,
                                                      staged_weight));
                         wait_for_load_ack_op(pe, OP_LOAD_WEIGHT,
                                              string("FC layer ") +
                                                  num_to_string(layer) +
                                                  " systolic weight for PE " +
-                                                 num_to_string(pe));
+                                                 num_to_string(pe),
+                                             true);
                     }
                 }
 
@@ -1160,7 +1197,8 @@ SC_MODULE(Controller)
 
                 sram_write_only(SRAM_FC_PSUM_BASE, psum_tile,
                                 string("FC layer ") + num_to_string(layer) +
-                                    " updated partial sums");
+                                    " updated partial sums",
+                                true);
             }
 
             vector<float> output_tile(active_cols, 0.0f);
@@ -1170,14 +1208,22 @@ SC_MODULE(Controller)
             sram_write_only(SRAM_FC_OUTPUT_BASE + (unsigned int)out_base,
                             output_tile,
                             string("FC layer ") + num_to_string(layer) +
-                                " output tile");
+                                " output tile",
+                            true);
             vector<float> committed_tile =
                 sram_read_only(SRAM_FC_OUTPUT_BASE + (unsigned int)out_base,
                                active_cols,
                                string("FC layer ") + num_to_string(layer) +
-                                   " committed output tile");
+                                   " committed output tile",
+                               true);
             for (int col = 0; col < active_cols; col++)
                 output[out_base + col] = committed_tile[col];
+
+            int done_outputs = out_base + active_cols;
+            progress_log(string("FC layer ") + num_to_string(layer) +
+                         " progress: outputs " +
+                         num_to_string(done_outputs) + "/" +
+                         num_to_string(out_size) + ".");
         }
 
         debug_log(string("Finished PE-based systolic FC layer ") + num_to_string(layer) + ".");
