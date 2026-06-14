@@ -16,23 +16,36 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
              << ", beats=" << beats
              << ", total_read_words=" << read_words << endl;
 #endif
+    // Send the AXI read address phase. ARLEN stores beats - 1, following AXI.
     araddr.write(addr);
     arlen.write(beats - 1u);
     arsize.write(AXI_FLOAT_SIZE_LOG2);
     arvalid.write(true);
-    do { wait(); } while (!arready.read());
+    do
+    {
+        wait();
+    } while (!arready.read());
     arvalid.write(false);
 
+    // Accept each read beat from DRAM, then forward it to the Controller.
+    // RREADY is held until DRAM presents RVALID. read_valid is held until the
+    // Controller accepts the streamed word with read_ready.
     for (unsigned int i = 0; i < beats; i++)
     {
         rready.write(true);
-        do { wait(); } while (!rvalid.read());
+        do
+        {
+            wait();
+        } while (!rvalid.read());
         float value = rdata.read();
         (void)rlast.read();
         rready.write(false);
         read_data.write(value);
         read_valid.write(true);
-        do { wait(); } while (!read_ready.read());
+        do
+        {
+            wait();
+        } while (!read_ready.read());
         read_valid.write(false);
         read_words++;
     }
@@ -47,37 +60,57 @@ void AxiDma::write_burst(unsigned int addr, unsigned int beats)
          << ", beats=" << beats
          << ", total_write_words=" << write_words << endl;
 #endif
+    // Send the AXI write address phase before any write-data beats.
     awaddr.write(addr);
     awlen.write(beats - 1u);
     awsize.write(AXI_FLOAT_SIZE_LOG2);
     awvalid.write(true);
-    do { wait(); } while (!awready.read());
+    do
+    {
+        wait();
+    } while (!awready.read());
     awvalid.write(false);
 
+    // Pull one word at a time from the Controller and push it to DRAM.
+    // Both sides use valid/ready handshakes, so VALID is kept asserted until
+    // the receiver raises READY.
     for (unsigned int i = 0; i < beats; i++)
     {
+        // Wait for the Controller to present the next word to DMA write.
         write_ready.write(true);
-        do { wait(); } while (!write_valid.read());
+        do
+        {
+            wait();
+        } while (!write_valid.read());
         float value = write_data.read();
         write_ready.write(false);
 
+        // DMA accepts the word and sends it to DRAM.
         wdata.write(value);
         wlast.write(i + 1u == beats);
         wvalid.write(true);
-        do { wait(); } while (!wready.read());
+        do
+        {
+            wait();
+        } while (!wready.read());
         wvalid.write(false);
         wlast.write(false);
         write_words++;
     }
 
+    // Wait for DRAM's write response before completing this burst.
     bready.write(true);
-    do { wait(); } while (!bvalid.read());
+    do
+    {
+        wait();
+    } while (!bvalid.read());
     bready.write(false);
     write_bursts++;
 }
 
 void AxiDma::run()
 {
+    // Drive all outputs to idle values before reset is released.
     cmd_ready.write(false);
     done.write(false);
     read_valid.write(false);
@@ -96,6 +129,8 @@ void AxiDma::run()
 
     while (true)
     {
+        // Wait for one Controller command. The DMA handles one command at a
+        // time in this baseline, so outstanding transactions are not modeled.
         cmd_ready.write(true);
         done.write(false);
         wait();
@@ -108,6 +143,8 @@ void AxiDma::run()
         unsigned int remaining = cmd_len.read();
         cmd_ready.write(false);
 
+        // Split long commands into fixed-size AXI bursts. The byte address is
+        // advanced by four bytes per float word.
         unsigned int offset = 0;
         while (remaining > 0)
         {
