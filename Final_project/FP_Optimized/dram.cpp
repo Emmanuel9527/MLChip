@@ -140,6 +140,14 @@ void DRAM::run()
             unsigned int addr = araddr.read();
             unsigned int beats = arlen.read() + 1u;
             unsigned int step = 1u << arsize.read();
+#if defined(FP_TRACE)
+            if (addr < 0x100u)
+            {
+                cout << "[TRACE] DRAM accepted AR addr=0x"
+                     << hex << addr << dec
+                     << ", beats=" << beats << endl;
+            }
+#endif
             arready.write(false);
             awready.write(false);
 
@@ -148,9 +156,21 @@ void DRAM::run()
                 rdata.write(read_word(addr + beat * step));
                 rlast.write(beat + 1u == beats);
                 rvalid.write(true);
+                unsigned int wait_cycles = 0;
                 do
                 {
                     wait();
+#if defined(FP_TRACE)
+                    wait_cycles++;
+                    if (wait_cycles % 100000 == 0)
+                    {
+                        cout << "[TRACE] DRAM waiting RREADY, addr=0x"
+                             << hex << (addr + beat * step) << dec
+                             << ", beat=" << beat
+                             << ", rvalid=" << rvalid.read()
+                             << ", rready=" << rready.read() << endl;
+                    }
+#endif
                 } while (!rready.read());
                 rvalid.write(false);
                 rlast.write(false);

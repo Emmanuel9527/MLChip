@@ -21,9 +21,21 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
     arlen.write(beats - 1u);
     arsize.write(AXI_FLOAT_SIZE_LOG2);
     arvalid.write(true);
+    unsigned int wait_cycles = 0;
     do
     {
         wait();
+#if defined(FP_TRACE)
+        wait_cycles++;
+        if (wait_cycles % 100000 == 0)
+        {
+            cout << "[TRACE] DMA waiting ARREADY, burst #"
+                 << (read_bursts + 1)
+                 << ", addr=0x" << hex << addr << dec
+                 << ", arvalid=" << arvalid.read()
+                 << ", arready=" << arready.read() << endl;
+        }
+#endif
     } while (!arready.read());
     arvalid.write(false);
 
@@ -33,18 +45,42 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
     for (unsigned int i = 0; i < beats; i++)
     {
         rready.write(true);
+        wait_cycles = 0;
         do
         {
             wait();
+#if defined(FP_TRACE)
+            wait_cycles++;
+            if (wait_cycles % 100000 == 0)
+            {
+                cout << "[TRACE] DMA waiting RVALID, burst #"
+                     << (read_bursts + 1)
+                     << ", beat=" << i
+                     << ", rready=" << rready.read()
+                     << ", rvalid=" << rvalid.read() << endl;
+            }
+#endif
         } while (!rvalid.read());
         float value = rdata.read();
         (void)rlast.read();
         rready.write(false);
         read_data.write(value);
         read_valid.write(true);
+        wait_cycles = 0;
         do
         {
             wait();
+#if defined(FP_TRACE)
+            wait_cycles++;
+            if (wait_cycles % 100000 == 0)
+            {
+                cout << "[TRACE] DMA waiting Controller read_ready, burst #"
+                     << (read_bursts + 1)
+                     << ", beat=" << i
+                     << ", read_valid=" << read_valid.read()
+                     << ", read_ready=" << read_ready.read() << endl;
+            }
+#endif
         } while (!read_ready.read());
         read_valid.write(false);
         read_words++;
