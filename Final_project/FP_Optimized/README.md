@@ -67,22 +67,22 @@ DRAM -> AXI DMA -> Global SRAM scratchpad -> NoC HOST port -> PE0..PE15 systolic
 ```
 
 For each FC layer, the controller first stages the input activation vector in
-SRAM. It then processes up to four output neurons at a time, mapped to the four
-columns of the original 4x4 PE mesh. For each input tile, the controller splits
-the input dimension into four row segments. The input-vector segment `b(j)`
-flows horizontally from left to right across one PE row. Each PE keeps its
-matrix coefficient segment `a(i,j)` in local SRAM. The partial sum `c(i)` moves
-vertically from bottom to top through one PE column, and the top-boundary PE
-returns the finished tile partial sum to the controller. The controller writes
-partial sums and final output tiles back to SRAM for observability and traffic
-accounting. This follows the lecture MVM mapping for a PE-level 2D systolic
-dataflow.
+SRAM. It then treats the original 4x4 PE mesh as two independent 2x4 MVM
+sub-arrays. Each sub-array processes up to four output neurons, so one FC tile
+computes up to eight output neurons. For each input tile, the controller splits
+the input dimension into two row segments per sub-array. The input-vector
+segment `b(j)` flows horizontally from left to right across one PE row. Each PE
+keeps its matrix coefficient segment `a(i,j)` in local SRAM. The partial sum
+`c(i)` moves vertically from bottom to top inside its 2-row sub-array only, and
+the sub-array top-boundary PE returns the finished tile partial sum to the
+controller. This models a middle feed boundary between the upper and lower
+2x4 sub-arrays.
 
 The SRAM model is defined in `global_sram.h`:
 
 - Capacity: 2,097,152 32-bit words, or 8 MB
 - Data width: 32 bits
-- Banks: 1
+- Banks: 2
 - Read latency: 1 modeled cycle per word
 - Write latency: 1 modeled cycle per word
 
@@ -93,9 +93,9 @@ block access.
 The systolic FC behavior is implemented in the original PE model:
 
 - Array size: PE0..PE15 arranged as a physical 4x4 mesh
-- Four output-neuron columns are computed in parallel
+- Two 2x4 sub-arrays compute up to eight output-neuron columns in parallel
 - Input-vector segments flow horizontally across each active PE row
-- Partial sums flow vertically from bottom to top through each active PE column
+- Partial sums flow vertically from bottom to top inside each 2-row sub-array
 - Each PE contains a `PeLocalSram` SystemC module for input, weight, and bias tiles
 - Each PE contains a `NonlinearFunction` SystemC module for ReLU and max selection
 - Input activation segments are read from Global SRAM and loaded into PE local buffers
@@ -153,9 +153,9 @@ The main dependences are:
   `weight[o][i]` is consumed by the PE assigned to output `o`
 
 This graph exposes column-level parallelism across output neurons. The input
-dimension is spatially partitioned across the four PE rows, input-vector
-segments flow left to right, and the partial-sum dependence is mapped onto the
-bottom-to-top PE links.
+dimension is spatially partitioned across two PE rows per sub-array,
+input-vector segments flow left to right, and the partial-sum dependence is
+mapped onto the bottom-to-top PE links inside each sub-array.
 
 ### DFG Mapping
 
@@ -168,68 +168,83 @@ The physical PE mesh is a 4x4 array with PE ids:
 12  13  14  15
 ```
 
-For each FC output tile, up to four output neurons are mapped to the four PE
-columns:
+For each FC output tile, up to eight output neurons are mapped to two 2x4
+sub-arrays:
 
 ```text
-col 0: PE12 -> PE8  -> PE4  -> PE0  computes output out_base + 0
-col 1: PE13 -> PE9  -> PE5  -> PE1  computes output out_base + 1
-col 2: PE14 -> PE10 -> PE6  -> PE2  computes output out_base + 2
-col 3: PE15 -> PE11 -> PE7  -> PE3  computes output out_base + 3
+upper sub-array:
+col 0: PE4  -> PE0  computes output out_base + 0
+col 1: PE5  -> PE1  computes output out_base + 1
+col 2: PE6  -> PE2  computes output out_base + 2
+col 3: PE7  -> PE3  computes output out_base + 3
+
+lower sub-array:
+col 0: PE12 -> PE8  computes output out_base + 4
+col 1: PE13 -> PE9  computes output out_base + 5
+col 2: PE14 -> PE10 computes output out_base + 6
+col 3: PE15 -> PE11 computes output out_base + 7
 ```
 
 The mapping function is:
 
 ```text
-col = o - out_base, for 0 <= col < 4
-data_row = input segment id, for 0 <= data_row < 4
-physical_row = 3 - data_row
+local_out = o - out_base, for 0 <= local_out < 8
+sub = local_out / 4
+col = local_out % 4
+data_row = input segment id, for 0 <= data_row < 2
+top_boundary_row = sub * 2
+physical_row = top_boundary_row + 1 - data_row
 PE id = physical_row * 4 + col
 ```
 
 The input dimension is tiled by `SYSTOLIC_INPUT_TILE_WORDS`. For each input
 tile:
 
-1. The input activation tile is read from Global SRAM and split into four row
-   segments.
+1. The input activation tile is read from Global SRAM and split into two row
+   segments for each 2x4 sub-array.
 2. The west PE of each active row receives one input segment and forwards it
-   horizontally to the active columns, modeling the lecture's `b` flow.
+   horizontally to the active columns, modeling the lecture's `b` flow. The
+   upper and lower sub-arrays use separate feed rows, corresponding to a middle
+   transfer boundary and two SRAM feed banks.
 3. Each PE receives the matching weight segment for its output column.
-4. The bottom PE of each active column receives the incoming partial sum.
+4. The bottom PE of each active sub-array column receives the incoming partial
+   sum.
 5. Each PE performs local MAC accumulation and forwards the updated partial sum
    to the next PE on the north side.
-6. The top-boundary PE returns the column result to the controller.
+6. The top-boundary PE of that 2-row sub-array returns the column result to the
+   controller.
 7. The current partial sums are written back to the Global SRAM partial-sum
    region for observability and cycle-aware SRAM traffic accounting.
 
 The schedule is:
 
 ```text
-for out_base in output neurons step 4:
-    initialize column partial sums with bias[out_base : out_base + 3]
+for out_base in output neurons step 8:
+    initialize column partial sums with bias[out_base : out_base + 7]
     for input_base in input vector step SYSTOLIC_INPUT_TILE_WORDS:
-        split input tile into four row segments
-        send each segment into the west PE of one row
-        input segments flow left to right across active columns
-        load matching weight segments into PE local SRAM
-        send each column partial sum into the bottom PE
-        partial sums flow bottom to top through the column
+        for each 2x4 sub-array:
+            split input tile into two row segments
+            send each segment into the west PE of one row
+            input segments flow left to right across active columns
+            load matching weight segments into PE local SRAM
+            send each column partial sum into the sub-array bottom PE
+            partial sums flow bottom to top inside the sub-array
         write partial sums to SRAM
-    apply nonlinear function at the top-boundary PE on the final tile
+    apply nonlinear function at each sub-array top-boundary PE on the final tile
     write output tile to SRAM
 ```
 
 The modeled systolic cycle count for one input tile is:
 
 ```text
-ceil(tile_words / (4 * 16)) + 4 + 4 - 2
+ceil(tile_words / (2 * 16)) + 2 + 4 - 2
 ```
 
-where the first term models four PE rows per output column, each with a 16-lane
-MAC array, and `4 + 4 - 2` is the 4x4 PE-array fill/drain overhead. The
+where the first term models two PE rows per output column, each with a 16-lane
+MAC array, and `2 + 4 - 2` is the 2x4 sub-array fill/drain overhead. The
 arithmetic is still behavioral, but the data movement, buffering, horizontal
 input forwarding, vertical partial-sum forwarding, and cycle metrics follow the
-lecture MVM systolic dataflow.
+lecture MVM systolic dataflow with two parallel sub-arrays.
 
 The local SRAM bandwidth assumption for the FC systolic path is:
 

@@ -409,10 +409,12 @@ SC_MODULE(PE)
     }
 
     // Lecture-style systolic MVM accumulate:
-    // [op, job_id, output_index, controller_id, apply_relu_on_top_edge, psum_in]
+    // [op, job_id, output_index, controller_id, apply_relu_on_top_edge,
+    //  top_boundary_row, psum_in]
     // Each PE consumes its local input/weight segment, adds to psum_in, and
-    // forwards the updated partial sum to the PE on its north side. The top
-    // boundary PE returns the output value to the Controller.
+    // forwards the updated partial sum to the PE on its north side until it
+    // reaches this sub-array's top boundary row. That boundary PE returns the
+    // output value to the Controller.
     Packet *run_systolic_mvm_accum(const Packet &job)
     {
         const vector<float> &d = job.datas;
@@ -420,7 +422,8 @@ SC_MODULE(PE)
         int output_index = (int)d[2];
         int controller_id = (int)d[3];
         bool apply_relu = ((int)d[4] != 0);
-        double psum = (double)d[5];
+        int top_boundary_row = (int)d[5];
+        double psum = (double)d[6];
 
         unsigned int words = local_sram.input_size();
         if (words > local_sram.weight_size())
@@ -435,7 +438,7 @@ SC_MODULE(PE)
         Packet *result = new Packet();
         result->source_id = id;
 
-        if (row > 0)
+        if (row > top_boundary_row)
         {
             result->dest_id = id - 4;
             result->datas.push_back((float)OP_SYSTOLIC_MVM_ACCUM);
@@ -443,6 +446,7 @@ SC_MODULE(PE)
             result->datas.push_back((float)output_index);
             result->datas.push_back((float)controller_id);
             result->datas.push_back(apply_relu ? 1.0f : 0.0f);
+            result->datas.push_back((float)top_boundary_row);
             result->datas.push_back((float)psum);
         }
         else
