@@ -1470,10 +1470,19 @@ SC_MODULE(Controller)
                 output[out_base + local_out] = committed_tile[local_out];
 
             int done_outputs = out_base + active_outputs;
+            unsigned long long done_macs =
+                (unsigned long long)done_outputs *
+                (unsigned long long)in_size;
+            unsigned long long total_macs =
+                (unsigned long long)out_size *
+                (unsigned long long)in_size;
             progress_log(string("FC layer ") + num_to_string(layer) +
                          " progress: outputs " +
                          num_to_string(done_outputs) + "/" +
                          num_to_string(out_size) +
+                         ", MACs " +
+                         num_to_string(done_macs) + "/" +
+                         num_to_string(total_macs) +
                          ", weight ping-pong buffers enabled" +
                          ".");
         }
