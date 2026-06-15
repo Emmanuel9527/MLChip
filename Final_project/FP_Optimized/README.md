@@ -85,6 +85,10 @@ The SRAM model is defined in `global_sram.h`:
 - Banks: 2
 - Read latency: 1 modeled cycle per word
 - Write latency: 1 modeled cycle per word
+- FC weight staging uses two ping-pong regions in Global SRAM so the active
+  tile's weight buffer is not overwritten by the next staged tile.
+- A Controller-side FC weight prefetch thread overlaps AXI DMA prefetch for
+  input tile `k + 1` with systolic PE computation of input tile `k`.
 
 To keep SystemC simulation practical, the full SRAM cycle cost is accumulated
 in metrics while the simulator advances one synchronization cycle per SRAM
@@ -254,11 +258,37 @@ weight side: 16 banks x 32-bit word/cycle = 16 weight words/cycle
 partial sum: kept in a PE-local accumulator register
 ```
 
+Each PE has a 64 KB local SRAM. With the two-2x4 FC mapping and
+`SYSTOLIC_INPUT_TILE_WORDS = 4096`, each PE receives up to 2048 input words and
+2048 weight words for one tile, or about 16 KB total. This leaves enough room
+for a future PE-local ping-pong extension. The current implementation uses
+Global SRAM ping-pong buffers and an FC weight prefetch thread for the large
+FC weight staging region, while PE local SRAM is loaded only with the active
+tile before computation.
+
 This bandwidth is sufficient to feed the 16-MAC internal array in each PE.
 The Global SRAM is still useful because it stages reusable FC activations,
 weight segments, bias values, partial sums, and output tiles between the AXI DMA
 and the NoC/PE array instead of forcing every PE load to come directly from
 DRAM.
+
+Bias prefetch is not the primary optimization because one FC tile needs at most
+eight bias words, while the corresponding FC weight tile contains thousands of
+words. The design therefore prioritizes FC weight ping-pong buffering.
+
+The FC weight prefetch schedule is:
+
+```text
+prefetch weights for input tile 0 into ping
+for each input tile k:
+    wait until ping/pong buffer for tile k is ready
+    load PE local SRAM from the ready Global SRAM buffer
+    start DMA prefetch of input tile k+1 into the other Global SRAM buffer
+    compute tile k on the two 2x4 systolic sub-arrays
+```
+
+This protects the active compute tile from overwrite while exposing DRAM
+latency overlap between the DMA prefetch thread and the PE compute path.
 
 ## AXI4-like DMA Model
 

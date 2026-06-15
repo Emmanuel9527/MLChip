@@ -89,13 +89,24 @@ SC_MODULE(Controller)
     unsigned long long optimized_systolic_wait_cycles;
     unsigned long long optimized_systolic_mac_ops;
     unsigned long long optimized_systolic_tiles;
+    bool fc_prefetch_request;
+    bool fc_prefetch_busy;
+    bool fc_prefetch_done;
+    int fc_prefetch_layer;
+    int fc_prefetch_in_size;
+    int fc_prefetch_out_base;
+    int fc_prefetch_active_outputs;
+    int fc_prefetch_input_base;
+    int fc_prefetch_tile_words;
+    int fc_prefetch_buffer_id;
 
     static const unsigned int SRAM_CAPACITY_WORDS = 2097152;
     static const unsigned int SRAM_FC_INPUT_BASE = 0;
-    static const unsigned int SRAM_FC_WEIGHT_TILE_BASE = 65536;
-    static const unsigned int SRAM_FC_BIAS_TILE_BASE = 131072;
-    static const unsigned int SRAM_FC_PSUM_BASE = 196608;
-    static const unsigned int SRAM_FC_OUTPUT_BASE = 262144;
+    static const unsigned int SRAM_FC_WEIGHT_PING_BASE = 65536;
+    static const unsigned int SRAM_FC_WEIGHT_PONG_BASE = 131072;
+    static const unsigned int SRAM_FC_BIAS_TILE_BASE = 196608;
+    static const unsigned int SRAM_FC_PSUM_BASE = 200704;
+    static const unsigned int SRAM_FC_OUTPUT_BASE = 204800;
     static const int SYSTOLIC_ARRAY_ROWS = 4;
     static const int SYSTOLIC_ARRAY_COLS = 4;
     static const int SYSTOLIC_SUBARRAY_ROWS = 2;
@@ -103,6 +114,12 @@ SC_MODULE(Controller)
     static const int SYSTOLIC_OUTPUTS_PER_TILE = 8;
     static const int PE_MACS_PER_CYCLE = 16;
     static const int SYSTOLIC_INPUT_TILE_WORDS = 4096;
+
+    unsigned int fc_weight_buffer_base(int buffer_id) const
+    {
+        return (buffer_id == 0) ? SRAM_FC_WEIGHT_PING_BASE
+                                : SRAM_FC_WEIGHT_PONG_BASE;
+    }
 
     void debug_log(const string &msg)
     {
@@ -648,6 +665,75 @@ SC_MODULE(Controller)
         return -1;
     }
 
+    int systolic_result_index(const Packet &packet,
+                              const vector<int> &job_ids,
+                              const vector<int> &sources,
+                              const vector<bool> &received)
+    {
+        if (packet.datas.empty())
+            return -1;
+
+        int job_id = (int)packet.datas[0];
+        for (size_t i = 0; i < job_ids.size(); i++)
+        {
+            if (received[i])
+                continue;
+            if (job_ids[i] == job_id && sources[i] == packet.source_id)
+                return (int)i;
+        }
+        return -1;
+    }
+
+    void collect_systolic_results(const vector<int> &job_ids,
+                                  const vector<int> &sources,
+                                  vector<float> &psum_tile)
+    {
+        vector<bool> received(job_ids.size(), false);
+        int received_count = 0;
+
+        while (received_count < (int)job_ids.size())
+        {
+            bool found_pending = false;
+            for (size_t i = 0; i < pending_packets.size(); i++)
+            {
+                int index =
+                    systolic_result_index(pending_packets[i],
+                                          job_ids,
+                                          sources,
+                                          received);
+                if (index < 0)
+                    continue;
+
+                Packet result = take_pending_packet(i);
+                if (result.datas.size() > 2)
+                    psum_tile[index] = result.datas[2];
+                received[index] = true;
+                received_count++;
+                found_pending = true;
+                break;
+            }
+            if (found_pending)
+                continue;
+
+            Packet packet = receive_packet();
+            int index = systolic_result_index(packet, job_ids, sources, received);
+            if (index >= 0)
+            {
+                if (packet.datas.size() > 2)
+                    psum_tile[index] = packet.datas[2];
+                received[index] = true;
+                received_count++;
+            }
+            else
+            {
+                pending_packets.push_back(packet);
+                debug_log(string("Buffering packet from PE ") +
+                          num_to_string(packet.source_id) +
+                          " while collecting FC systolic results.");
+            }
+        }
+    }
+
     // Initial image padding before conv1.
     vector<float> zero_pad_224_to_227(const vector<float> &input)
     {
@@ -1049,6 +1135,123 @@ SC_MODULE(Controller)
         return output;
     }
 
+    void prefetch_fc_weight_tile_now(int layer,
+                                     int in_size,
+                                     int out_base,
+                                     int active_outputs,
+                                     int input_base,
+                                     int tile_words,
+                                     int buffer_id)
+    {
+        unsigned int weight_buffer_base = fc_weight_buffer_base(buffer_id);
+
+        for (int sub = 0; sub < SYSTOLIC_SUBARRAYS; sub++)
+        {
+            int group_base = sub * SYSTOLIC_ARRAY_COLS;
+            int remaining_group_outputs = active_outputs - group_base;
+            if (remaining_group_outputs <= 0)
+                continue;
+            int active_cols = (remaining_group_outputs < SYSTOLIC_ARRAY_COLS)
+                                  ? remaining_group_outputs
+                                  : SYSTOLIC_ARRAY_COLS;
+            int top_boundary_row = sub * SYSTOLIC_SUBARRAY_ROWS;
+            int bottom_row = top_boundary_row + SYSTOLIC_SUBARRAY_ROWS - 1;
+
+            for (int data_row = 0; data_row < SYSTOLIC_SUBARRAY_ROWS; data_row++)
+            {
+                int seg_start = (tile_words * data_row) / SYSTOLIC_SUBARRAY_ROWS;
+                int seg_end = (tile_words * (data_row + 1)) / SYSTOLIC_SUBARRAY_ROWS;
+                int seg_words = seg_end - seg_start;
+                int global_input_start = input_base + seg_start;
+                int physical_row = bottom_row - data_row;
+
+                for (int col = 0; col < active_cols; col++)
+                {
+                    int local_out = group_base + col;
+                    int output_index = out_base + local_out;
+                    int pe = physical_row * SYSTOLIC_ARRAY_COLS + col;
+                    unsigned int weight_addr =
+                        dram_weight_base(layer) +
+                        ((unsigned int)output_index * (unsigned int)in_size +
+                         (unsigned int)global_input_start) *
+                            4u;
+                    vector<float> weight_segment =
+                        dma_read_vector(weight_addr, seg_words,
+                                        string("FC layer ") +
+                                            num_to_string(layer) +
+                                            " prefetch weight output " +
+                                            num_to_string(output_index) +
+                                            " PE " + num_to_string(pe),
+                                        true);
+                    sram_write_only(weight_buffer_base +
+                                        (unsigned int)pe *
+                                            SYSTOLIC_INPUT_TILE_WORDS,
+                                    weight_segment,
+                                    string("FC layer ") + num_to_string(layer) +
+                                        " ping-pong weight PE " +
+                                        num_to_string(pe),
+                                    true);
+                }
+            }
+        }
+    }
+
+    void start_fc_weight_prefetch(int layer,
+                                  int in_size,
+                                  int out_base,
+                                  int active_outputs,
+                                  int input_base,
+                                  int tile_words,
+                                  int buffer_id)
+    {
+        while (fc_prefetch_busy || fc_prefetch_request)
+            wait();
+        fc_prefetch_layer = layer;
+        fc_prefetch_in_size = in_size;
+        fc_prefetch_out_base = out_base;
+        fc_prefetch_active_outputs = active_outputs;
+        fc_prefetch_input_base = input_base;
+        fc_prefetch_tile_words = tile_words;
+        fc_prefetch_buffer_id = buffer_id;
+        fc_prefetch_done = false;
+        fc_prefetch_request = true;
+    }
+
+    void wait_fc_weight_prefetch()
+    {
+        while (!fc_prefetch_done)
+            wait();
+        fc_prefetch_done = false;
+    }
+
+    void fc_weight_prefetch_thread()
+    {
+        while (!reset_n.read())
+            wait();
+
+        while (true)
+        {
+            if (!fc_prefetch_request)
+            {
+                wait();
+                continue;
+            }
+
+            fc_prefetch_request = false;
+            fc_prefetch_busy = true;
+            prefetch_fc_weight_tile_now(fc_prefetch_layer,
+                                        fc_prefetch_in_size,
+                                        fc_prefetch_out_base,
+                                        fc_prefetch_active_outputs,
+                                        fc_prefetch_input_base,
+                                        fc_prefetch_tile_words,
+                                        fc_prefetch_buffer_id);
+            fc_prefetch_busy = false;
+            fc_prefetch_done = true;
+            wait();
+        }
+    }
+
     // Run one fully connected layer through the lecture-style MVM systolic map.
     vector<float> run_fc_on_pes(const vector<float> &feature,
                                 int layer, int out_size, bool apply_relu)
@@ -1092,9 +1295,28 @@ SC_MODULE(Controller)
                                 " initial partial sums",
                             true);
 
+            if (in_size > 0)
+            {
+                int first_tile_words = (in_size < SYSTOLIC_INPUT_TILE_WORDS)
+                                           ? in_size
+                                           : SYSTOLIC_INPUT_TILE_WORDS;
+                start_fc_weight_prefetch(layer,
+                                         in_size,
+                                         out_base,
+                                         active_outputs,
+                                         0,
+                                         first_tile_words,
+                                         0);
+            }
+
             for (int input_base = 0; input_base < in_size;
                  input_base += SYSTOLIC_INPUT_TILE_WORDS)
             {
+                wait_fc_weight_prefetch();
+                int input_tile_id = input_base / SYSTOLIC_INPUT_TILE_WORDS;
+                int weight_buffer_id = input_tile_id & 1;
+                unsigned int weight_buffer_base =
+                    fc_weight_buffer_base(weight_buffer_id);
                 int remaining_inputs = in_size - input_base;
                 int tile_words = (remaining_inputs < SYSTOLIC_INPUT_TILE_WORDS)
                                      ? remaining_inputs
@@ -1150,29 +1372,16 @@ SC_MODULE(Controller)
                             int output_index = out_base + local_out;
                             int pe = physical_row * SYSTOLIC_ARRAY_COLS + col;
 
-                            unsigned int weight_addr =
-                                dram_weight_base(layer) +
-                                ((unsigned int)output_index * (unsigned int)in_size +
-                                 (unsigned int)global_input_start) *
-                                    4u;
-                            vector<float> weight_segment =
-                                dma_read_vector(weight_addr, seg_words,
-                                                string("FC layer ") +
-                                                    num_to_string(layer) +
-                                                    " systolic weight output " +
-                                                    num_to_string(output_index) +
-                                                    " PE " + num_to_string(pe),
-                                                true);
                             vector<float> staged_weight =
-                                sram_stage_block(SRAM_FC_WEIGHT_TILE_BASE +
-                                                     (unsigned int)pe *
-                                                         SYSTOLIC_INPUT_TILE_WORDS,
-                                                 weight_segment,
-                                                 string("FC layer ") +
-                                                     num_to_string(layer) +
-                                                     " PE " + num_to_string(pe) +
-                                                     " weight segment",
-                                                 true);
+                                sram_read_only(weight_buffer_base +
+                                                   (unsigned int)pe *
+                                                       SYSTOLIC_INPUT_TILE_WORDS,
+                                               seg_words,
+                                               string("FC layer ") +
+                                                   num_to_string(layer) +
+                                                   " PE " + num_to_string(pe) +
+                                                   " prefetched weight segment",
+                                               true);
                             send_packet(make_load_packet(pe, OP_LOAD_WEIGHT, layer,
                                                          staged_weight));
                             wait_for_load_ack_op(pe, OP_LOAD_WEIGHT,
@@ -1183,6 +1392,23 @@ SC_MODULE(Controller)
                                                  true);
                         }
                     }
+                }
+
+                int next_input_base = input_base + SYSTOLIC_INPUT_TILE_WORDS;
+                if (next_input_base < in_size)
+                {
+                    int remaining_next_inputs = in_size - next_input_base;
+                    int next_tile_words =
+                        (remaining_next_inputs < SYSTOLIC_INPUT_TILE_WORDS)
+                            ? remaining_next_inputs
+                            : SYSTOLIC_INPUT_TILE_WORDS;
+                    start_fc_weight_prefetch(layer,
+                                             in_size,
+                                             out_base,
+                                             active_outputs,
+                                             next_input_base,
+                                             next_tile_words,
+                                             (input_tile_id + 1) & 1);
                 }
 
                 vector<int> job_ids(active_outputs, 0);
@@ -1206,15 +1432,10 @@ SC_MODULE(Controller)
                                                         top_boundary_row,
                                                         psum_tile[local_out]));
                 }
-                for (int local_out = 0; local_out < active_outputs; local_out++)
-                {
-                    Packet result =
-                        receive_specific_packet(job_ids[local_out],
-                                                result_sources[local_out]);
-                    if (result.datas.size() > 2)
-                        psum_tile[local_out] = result.datas[2];
-                    optimized_systolic_mac_ops += tile_words;
-                }
+                collect_systolic_results(job_ids, result_sources, psum_tile);
+                optimized_systolic_mac_ops +=
+                    (unsigned long long)active_outputs *
+                    (unsigned long long)tile_words;
 
                 unsigned int systolic_cycles =
                     (tile_words +
@@ -1252,7 +1473,9 @@ SC_MODULE(Controller)
             progress_log(string("FC layer ") + num_to_string(layer) +
                          " progress: outputs " +
                          num_to_string(done_outputs) + "/" +
-                         num_to_string(out_size) + ".");
+                         num_to_string(out_size) +
+                         ", weight ping-pong buffers enabled" +
+                         ".");
         }
 
         debug_log(string("Finished PE-based systolic FC layer ") + num_to_string(layer) + ".");
@@ -1400,6 +1623,9 @@ SC_MODULE(Controller)
         optimized_systolic_wait_cycles = 0;
         optimized_systolic_mac_ops = 0;
         optimized_systolic_tiles = 0;
+        fc_prefetch_request = false;
+        fc_prefetch_busy = false;
+        fc_prefetch_done = false;
         global_sram.configure(SRAM_CAPACITY_WORDS, 32, 1, 1, SYSTOLIC_SUBARRAYS);
         dma_cmd_valid.write(false);
         dma_cmd_write.write(false);
@@ -1479,7 +1705,12 @@ SC_MODULE(Controller)
     // Register the Controller as one clocked SystemC thread.
     SC_CTOR(Controller)
     {
+        fc_prefetch_request = false;
+        fc_prefetch_busy = false;
+        fc_prefetch_done = false;
         SC_THREAD(run);
+        sensitive << clk.pos();
+        SC_THREAD(fc_weight_prefetch_thread);
         sensitive << clk.pos();
     }
 };
