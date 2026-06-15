@@ -111,10 +111,10 @@ The systolic FC behavior is implemented in the original PE model:
 Each original PE is modeled with three hardware-oriented blocks:
 
 - Local SRAM: `PeLocalSram` stores input activation tiles, weight tiles, and
-  bias tiles. Each PE models a 64 KB local SRAM with 16 input banks and 16
+  bias tiles. Each PE models a 64 KB local SRAM with 64 input banks and 64
   weight banks for the FC systolic tile path.
-- MAC array: each PE models a 4x4 internal MAC array with 16 MAC units, so
-  `MACS_PER_CYCLE = 16`.
+- MAC array: each PE models a 64-lane internal MAC array, so
+  `MACS_PER_CYCLE = 64`.
 - Nonlinear function: `NonlinearFunction` performs ReLU for convolution/FC and
   max selection for pooling.
 
@@ -241,10 +241,10 @@ for out_base in output neurons step 8:
 The modeled systolic cycle count for one input tile is:
 
 ```text
-ceil(tile_words / (2 * 16)) + 2 + 4 - 2
+ceil(tile_words / (2 * 64)) + 2 + 4 - 2
 ```
 
-where the first term models two PE rows per output column, each with a 16-lane
+where the first term models two PE rows per output column, each with a 64-lane
 MAC array, and `2 + 4 - 2` is the 2x4 sub-array fill/drain overhead. The
 arithmetic is still behavioral, but the data movement, buffering, horizontal
 input forwarding, vertical partial-sum forwarding, and cycle metrics follow the
@@ -253,8 +253,8 @@ lecture MVM systolic dataflow with two parallel sub-arrays.
 The local SRAM bandwidth assumption for the FC systolic path is:
 
 ```text
-input side:  16 banks x 32-bit word/cycle = 16 input words/cycle
-weight side: 16 banks x 32-bit word/cycle = 16 weight words/cycle
+input side:  64 banks x 32-bit word/cycle = 64 input words/cycle
+weight side: 64 banks x 32-bit word/cycle = 64 weight words/cycle
 partial sum: kept in a PE-local accumulator register
 ```
 
@@ -266,7 +266,7 @@ Global SRAM ping-pong buffers and an FC weight prefetch thread for the large
 FC weight staging region, while PE local SRAM is loaded only with the active
 tile before computation.
 
-This bandwidth is sufficient to feed the 16-MAC internal array in each PE.
+This bandwidth is sufficient to feed the 64-MAC internal array in each PE.
 The Global SRAM is still useful because it stages reusable FC activations,
 weight segments, bias values, partial sums, and output tiles between the AXI DMA
 and the NoC/PE array instead of forcing every PE load to come directly from

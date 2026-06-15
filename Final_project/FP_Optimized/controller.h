@@ -146,7 +146,7 @@ SC_MODULE(Controller)
     static const int SYSTOLIC_SUBARRAY_ROWS = 2;
     static const int SYSTOLIC_SUBARRAYS = 2;
     static const int SYSTOLIC_OUTPUTS_PER_TILE = 8;
-    static const int PE_MACS_PER_CYCLE = 16;
+    static const int PE_MACS_PER_CYCLE = 64;
     static const int SYSTOLIC_INPUT_TILE_WORDS = 4096;
 
     unsigned int fc_weight_buffer_base(int buffer_id) const
