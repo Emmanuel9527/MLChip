@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -99,6 +100,39 @@ SC_MODULE(Controller)
     int fc_prefetch_input_base;
     int fc_prefetch_tile_words;
     int fc_prefetch_buffer_id;
+    sc_event dma_service_request_event;
+    sc_event dma_service_done_event;
+    bool dma_service_request;
+    bool dma_service_busy;
+    bool dma_service_write;
+    bool dma_service_quiet;
+    unsigned int dma_service_addr;
+    unsigned int dma_service_words;
+    string dma_service_name;
+    vector<float> dma_service_write_values;
+    vector<float> dma_service_read_values;
+
+    struct SramTag
+    {
+        bool valid;
+        int layer;
+        int output_index;
+        int input_base;
+        int words;
+        int pe;
+        int buffer_id;
+
+        SramTag() :
+            valid(false),
+            layer(-1),
+            output_index(-1),
+            input_base(-1),
+            words(0),
+            pe(-1),
+            buffer_id(-1) {}
+    };
+
+    map<unsigned int, SramTag> fc_weight_tags;
 
     static const unsigned int SRAM_CAPACITY_WORDS = 2097152;
     static const unsigned int SRAM_FC_INPUT_BASE = 0;
@@ -119,6 +153,68 @@ SC_MODULE(Controller)
     {
         return (buffer_id == 0) ? SRAM_FC_WEIGHT_PING_BASE
                                 : SRAM_FC_WEIGHT_PONG_BASE;
+    }
+
+    void tag_fc_weight_sram(unsigned int addr,
+                            int layer,
+                            int output_index,
+                            int input_base,
+                            int words,
+                            int pe,
+                            int buffer_id)
+    {
+        SramTag tag;
+        tag.valid = true;
+        tag.layer = layer;
+        tag.output_index = output_index;
+        tag.input_base = input_base;
+        tag.words = words;
+        tag.pe = pe;
+        tag.buffer_id = buffer_id;
+        fc_weight_tags[addr] = tag;
+    }
+
+    void check_fc_weight_sram(unsigned int addr,
+                              int layer,
+                              int output_index,
+                              int input_base,
+                              int words,
+                              int pe,
+                              int buffer_id)
+    {
+        map<unsigned int, SramTag>::iterator it = fc_weight_tags.find(addr);
+        bool ok = it != fc_weight_tags.end() &&
+                  it->second.valid &&
+                  it->second.layer == layer &&
+                  it->second.output_index == output_index &&
+                  it->second.input_base == input_base &&
+                  it->second.words == words &&
+                  it->second.pe == pe &&
+                  it->second.buffer_id == buffer_id;
+        if (ok)
+            return;
+
+        cout << "[ERROR] FC weight SRAM tag mismatch at addr=" << addr
+             << ", expected layer=" << layer
+             << ", output=" << output_index
+             << ", input_base=" << input_base
+             << ", words=" << words
+             << ", PE=" << pe
+             << ", buffer=" << buffer_id << endl;
+        if (it != fc_weight_tags.end())
+        {
+            cout << "[ERROR] Found tag layer=" << it->second.layer
+                 << ", output=" << it->second.output_index
+                 << ", input_base=" << it->second.input_base
+                 << ", words=" << it->second.words
+                 << ", PE=" << it->second.pe
+                 << ", buffer=" << it->second.buffer_id << endl;
+        }
+        else
+        {
+            cout << "[ERROR] No tag found for this SRAM address." << endl;
+        }
+        sc_stop();
     }
 
     void debug_log(const string &msg)
@@ -177,10 +273,10 @@ SC_MODULE(Controller)
         dma_cmd_valid.write(false);
     }
 
-    vector<float> dma_read_vector(unsigned int addr,
-                                  int expected,
-                                  const string &name,
-                                  bool quiet_detail = false)
+    vector<float> dma_read_vector_direct(unsigned int addr,
+                                         int expected,
+                                         const string &name,
+                                         bool quiet_detail)
     {
         vector<float> values;
         values.reserve(expected);
@@ -216,11 +312,15 @@ SC_MODULE(Controller)
         return values;
     }
 
-    void dma_write_vector(unsigned int addr, const vector<float> &values, const string &name)
+    void dma_write_vector_direct(unsigned int addr,
+                                 const vector<float> &values,
+                                 const string &name,
+                                 bool quiet_detail)
     {
         optimized_dram_write_words += values.size();
-        debug_log(string("DMA write request: ") + name + ", words=" +
-                  num_to_string(values.size()) + ".");
+        if (!quiet_detail)
+            debug_log(string("DMA write request: ") + name + ", words=" +
+                      num_to_string(values.size()) + ".");
         start_dma_command(true, addr, (unsigned int)values.size());
 
         for (size_t i = 0; i < values.size(); i++)
@@ -235,7 +335,87 @@ SC_MODULE(Controller)
         }
         while (!dma_done.read())
             wait();
-        debug_log(string("Finished DMA write: ") + name + ".");
+        if (!quiet_detail)
+            debug_log(string("Finished DMA write: ") + name + ".");
+    }
+
+    vector<float> dma_read_vector(unsigned int addr,
+                                  int expected,
+                                  const string &name,
+                                  bool quiet_detail = false)
+    {
+        while (dma_service_busy || dma_service_request)
+            wait();
+        dma_service_write = false;
+        dma_service_quiet = quiet_detail;
+        dma_service_addr = addr;
+        dma_service_words = (unsigned int)expected;
+        dma_service_name = name;
+        dma_service_write_values.clear();
+        dma_service_read_values.clear();
+        dma_service_request = true;
+        dma_service_request_event.notify(SC_ZERO_TIME);
+        wait(dma_service_done_event);
+        return dma_service_read_values;
+    }
+
+    void dma_write_vector(unsigned int addr,
+                          const vector<float> &values,
+                          const string &name,
+                          bool quiet_detail = false)
+    {
+        while (dma_service_busy || dma_service_request)
+            wait();
+        dma_service_write = true;
+        dma_service_quiet = quiet_detail;
+        dma_service_addr = addr;
+        dma_service_words = (unsigned int)values.size();
+        dma_service_name = name;
+        dma_service_write_values = values;
+        dma_service_read_values.clear();
+        dma_service_request = true;
+        dma_service_request_event.notify(SC_ZERO_TIME);
+        wait(dma_service_done_event);
+    }
+
+    void dma_service_thread()
+    {
+        dma_cmd_valid.write(false);
+        dma_cmd_write.write(false);
+        dma_cmd_addr.write(0);
+        dma_cmd_len.write(0);
+        dma_read_ready.write(false);
+        dma_write_data.write(0.0f);
+        dma_write_valid.write(false);
+
+        while (!reset_n.read())
+            wait();
+
+        while (true)
+        {
+            if (!dma_service_request)
+                wait(dma_service_request_event);
+
+            dma_service_request = false;
+            dma_service_busy = true;
+            if (dma_service_write)
+            {
+                dma_write_vector_direct(dma_service_addr,
+                                        dma_service_write_values,
+                                        dma_service_name,
+                                        dma_service_quiet);
+            }
+            else
+            {
+                dma_service_read_values =
+                    dma_read_vector_direct(dma_service_addr,
+                                           (int)dma_service_words,
+                                           dma_service_name,
+                                           dma_service_quiet);
+            }
+            dma_service_busy = false;
+            dma_service_done_event.notify(SC_ZERO_TIME);
+        }
     }
 
     vector<float> read_dram_tensor(int id, bool type, int expected)
@@ -1183,14 +1363,22 @@ SC_MODULE(Controller)
                                             num_to_string(output_index) +
                                             " PE " + num_to_string(pe),
                                         true);
-                    sram_write_only(weight_buffer_base +
-                                        (unsigned int)pe *
-                                            SYSTOLIC_INPUT_TILE_WORDS,
+                    unsigned int sram_addr =
+                        weight_buffer_base +
+                        (unsigned int)pe * SYSTOLIC_INPUT_TILE_WORDS;
+                    sram_write_only(sram_addr,
                                     weight_segment,
                                     string("FC layer ") + num_to_string(layer) +
                                         " ping-pong weight PE " +
                                         num_to_string(pe),
                                     true);
+                    tag_fc_weight_sram(sram_addr,
+                                       layer,
+                                       output_index,
+                                       global_input_start,
+                                       seg_words,
+                                       pe,
+                                       buffer_id);
                 }
             }
         }
@@ -1259,6 +1447,7 @@ SC_MODULE(Controller)
         debug_log(string("Starting PE-based systolic FC layer ") + num_to_string(layer) + ".");
         int in_size = (int)feature.size();
         vector<float> output(out_size, 0.0f);
+        fc_weight_tags.clear();
 
         // Input activations are staged once in Global SRAM and reused by all
         // output-neuron tiles. This models an activation scratchpad feeding the
@@ -1371,11 +1560,20 @@ SC_MODULE(Controller)
                             int local_out = group_base + col;
                             int output_index = out_base + local_out;
                             int pe = physical_row * SYSTOLIC_ARRAY_COLS + col;
+                            unsigned int weight_sram_addr =
+                                weight_buffer_base +
+                                (unsigned int)pe *
+                                    SYSTOLIC_INPUT_TILE_WORDS;
+                            check_fc_weight_sram(weight_sram_addr,
+                                                 layer,
+                                                 output_index,
+                                                 global_input_start,
+                                                 seg_words,
+                                                 pe,
+                                                 weight_buffer_id);
 
                             vector<float> staged_weight =
-                                sram_read_only(weight_buffer_base +
-                                                   (unsigned int)pe *
-                                                       SYSTOLIC_INPUT_TILE_WORDS,
+                                sram_read_only(weight_sram_addr,
                                                seg_words,
                                                string("FC layer ") +
                                                    num_to_string(layer) +
@@ -1635,14 +1833,9 @@ SC_MODULE(Controller)
         fc_prefetch_request = false;
         fc_prefetch_busy = false;
         fc_prefetch_done = false;
+        dma_service_request = false;
+        dma_service_busy = false;
         global_sram.configure(SRAM_CAPACITY_WORDS, 32, 1, 1, SYSTOLIC_SUBARRAYS);
-        dma_cmd_valid.write(false);
-        dma_cmd_write.write(false);
-        dma_cmd_addr.write(0);
-        dma_cmd_len.write(0);
-        dma_read_ready.write(false);
-        dma_write_data.write(0.0f);
-        dma_write_valid.write(false);
         req_tx.write(false);
         set_rx_ready(false);
         flit_tx.write(0);
@@ -1717,7 +1910,11 @@ SC_MODULE(Controller)
         fc_prefetch_request = false;
         fc_prefetch_busy = false;
         fc_prefetch_done = false;
+        dma_service_request = false;
+        dma_service_busy = false;
         SC_THREAD(run);
+        sensitive << clk.pos();
+        SC_THREAD(dma_service_thread);
         sensitive << clk.pos();
         SC_THREAD(fc_weight_prefetch_thread);
         sensitive << clk.pos();

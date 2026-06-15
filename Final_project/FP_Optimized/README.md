@@ -290,6 +290,12 @@ for each input tile k:
 This protects the active compute tile from overwrite while exposing DRAM
 latency overlap between the DMA prefetch thread and the PE compute path.
 
+For debugging correctness, the controller also tracks an SRAM tag for every
+prefetched FC weight segment. Before a PE reads a weight segment from the
+ping-pong buffer, the tag is checked against the expected layer, output neuron,
+input offset, PE id, word count, and buffer id. A mismatch stops the simulation
+instead of allowing a PE to compute with stale or overwritten data.
+
 ## AXI4-like DMA Model
 
 The DMA supports:
