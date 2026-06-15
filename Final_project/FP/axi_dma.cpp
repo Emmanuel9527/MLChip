@@ -7,6 +7,28 @@ using namespace std;
 static const unsigned int AXI_BURST_MAX_BEATS = 16;
 static const unsigned int AXI_FLOAT_SIZE_LOG2 = 2;
 
+static sc_uint<32> float_to_axi_word(float value)
+{
+    union
+    {
+        float f;
+        unsigned int u;
+    } bits;
+    bits.f = value;
+    return bits.u;
+}
+
+static float axi_word_to_float(sc_uint<32> value)
+{
+    union
+    {
+        float f;
+        unsigned int u;
+    } bits;
+    bits.u = value.to_uint();
+    return bits.f;
+}
+
 void AxiDma::read_burst(unsigned int addr, unsigned int beats)
 {
 #if defined(FP_TRACE)
@@ -21,10 +43,25 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
     arlen.write(beats - 1u);
     arsize.write(AXI_FLOAT_SIZE_LOG2);
     arvalid.write(true);
+    unsigned int wait_cycles = 0;
     do
     {
         wait();
+#if defined(FP_TRACE)
+        wait_cycles++;
+        if (wait_cycles % 100000 == 0)
+        {
+            cout << "[TRACE] DMA waiting ARREADY, burst #"
+                 << (read_bursts + 1)
+                 << ", addr=0x" << hex << addr << dec
+                 << ", arvalid=" << arvalid.read()
+                 << ", arready=" << arready.read() << endl;
+        }
+#endif
     } while (!arready.read());
+    // Keep VALID for one extra modeled clock so the DRAM thread can sample the
+    // address handshake in SystemC's cooperative scheduling model.
+    wait();
     arvalid.write(false);
 
     // Accept each read beat from DRAM, then forward it to the Controller.
@@ -33,18 +70,42 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
     for (unsigned int i = 0; i < beats; i++)
     {
         rready.write(true);
+        wait_cycles = 0;
         do
         {
             wait();
+#if defined(FP_TRACE)
+            wait_cycles++;
+            if (wait_cycles % 100000 == 0)
+            {
+                cout << "[TRACE] DMA waiting RVALID, burst #"
+                     << (read_bursts + 1)
+                     << ", beat=" << i
+                     << ", rready=" << rready.read()
+                     << ", rvalid=" << rvalid.read() << endl;
+            }
+#endif
         } while (!rvalid.read());
-        float value = rdata.read();
+        float value = axi_word_to_float(rdata.read());
         (void)rlast.read();
         rready.write(false);
         read_data.write(value);
         read_valid.write(true);
+        wait_cycles = 0;
         do
         {
             wait();
+#if defined(FP_TRACE)
+            wait_cycles++;
+            if (wait_cycles % 100000 == 0)
+            {
+                cout << "[TRACE] DMA waiting Controller read_ready, burst #"
+                     << (read_bursts + 1)
+                     << ", beat=" << i
+                     << ", read_valid=" << read_valid.read()
+                     << ", read_ready=" << read_ready.read() << endl;
+            }
+#endif
         } while (!read_ready.read());
         read_valid.write(false);
         read_words++;
@@ -69,6 +130,9 @@ void AxiDma::write_burst(unsigned int addr, unsigned int beats)
     {
         wait();
     } while (!awready.read());
+    // Keep VALID for one extra modeled clock so the DRAM thread can sample the
+    // address handshake in SystemC's cooperative scheduling model.
+    wait();
     awvalid.write(false);
 
     // Pull one word at a time from the Controller and push it to DRAM.
@@ -86,7 +150,7 @@ void AxiDma::write_burst(unsigned int addr, unsigned int beats)
         write_ready.write(false);
 
         // DMA accepts the word and sends it to DRAM.
-        wdata.write(value);
+        wdata.write(float_to_axi_word(value));
         wlast.write(i + 1u == beats);
         wvalid.write(true);
         do
@@ -104,6 +168,11 @@ void AxiDma::write_burst(unsigned int addr, unsigned int beats)
     {
         wait();
     } while (!bvalid.read());
+    unsigned int response = bresp.read();
+#if defined(FP_TRACE)
+    if (response != 0u)
+        cout << "[TRACE] DMA write response BRESP=" << response << endl;
+#endif
     bready.write(false);
     write_bursts++;
 }
@@ -122,7 +191,7 @@ void AxiDma::run()
     wlast.write(false);
     bready.write(false);
     read_data.write(0.0f);
-    wdata.write(0.0f);
+    wdata.write(0u);
 
     while (!reset_n.read())
         wait();

@@ -38,7 +38,7 @@ int sc_main(int argc, char* argv[])
     sc_signal < unsigned int > arsize;
     sc_signal < bool > arvalid;
     sc_signal < bool > arready;
-    sc_signal < float > rdata;
+    sc_signal < sc_uint<32> > rdata;
     sc_signal < bool > rvalid;
     sc_signal < bool > rready;
     sc_signal < bool > rlast;
@@ -48,10 +48,11 @@ int sc_main(int argc, char* argv[])
     sc_signal < unsigned int > awsize;
     sc_signal < bool > awvalid;
     sc_signal < bool > awready;
-    sc_signal < float > wdata;
+    sc_signal < sc_uint<32> > wdata;
     sc_signal < bool > wvalid;
     sc_signal < bool > wready;
     sc_signal < bool > wlast;
+    sc_signal < unsigned int > bresp;
     sc_signal < bool > bvalid;
     sc_signal < bool > bready;
 
@@ -150,6 +151,7 @@ int sc_main(int argc, char* argv[])
     m_dram.wvalid( wvalid );
     m_dram.wready( wready );
     m_dram.wlast( wlast );
+    m_dram.bresp( bresp );
     m_dram.bvalid( bvalid );
     m_dram.bready( bready );
 
@@ -185,6 +187,7 @@ int sc_main(int argc, char* argv[])
     m_dma.wvalid( wvalid );
     m_dma.wready( wready );
     m_dma.wlast( wlast );
+    m_dma.bresp( bresp );
     m_dma.bvalid( bvalid );
     m_dma.bready( bready );
 

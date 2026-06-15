@@ -77,6 +77,10 @@ SC_MODULE(Controller)
     static const int UNEXPECTED_FLIT_LOG_INTERVAL = 1000;
     static const int DMA_PROGRESS_INTERVAL = 65536;
     static const int PACKET_PROGRESS_FLITS = 50000;
+    static const int DMA_SERVICE_READ_VECTOR = 0;
+    static const int DMA_SERVICE_WRITE_VECTOR = 1;
+    static const int DMA_SERVICE_READ_TO_SRAM = 2;
+    static const int DMA_SERVICE_WRITE_FROM_SRAM = 3;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
@@ -100,13 +104,18 @@ SC_MODULE(Controller)
     int fc_prefetch_input_base;
     int fc_prefetch_tile_words;
     int fc_prefetch_buffer_id;
+    // DMA descriptor/status register model. The Controller writes these
+    // registers to request one DMA transaction. The dma_service_thread is the
+    // only process that drives the actual DMA pins.
     sc_event dma_service_request_event;
     sc_event dma_service_done_event;
     bool dma_service_request;
     bool dma_service_busy;
+    int dma_service_mode;
     bool dma_service_write;
     bool dma_service_quiet;
     unsigned int dma_service_addr;
+    unsigned int dma_service_sram_addr;
     unsigned int dma_service_words;
     string dma_service_name;
     vector<float> dma_service_write_values;
@@ -148,6 +157,22 @@ SC_MODULE(Controller)
     static const int SYSTOLIC_OUTPUTS_PER_TILE = 8;
     static const int PE_MACS_PER_CYCLE = 64;
     static const int SYSTOLIC_INPUT_TILE_WORDS = 4096;
+    static const int CONTROLLER_FC_TILE_REGISTER_WORDS = SYSTOLIC_OUTPUTS_PER_TILE;
+
+    vector<float> make_fc_tile_register(int words,
+                                        const string &name,
+                                        float init_value = 0.0f)
+    {
+        if (words > CONTROLLER_FC_TILE_REGISTER_WORDS)
+        {
+            cout << "[ERROR] Controller FC tile register overflow for "
+                 << name << ": words=" << words
+                 << ", capacity=" << CONTROLLER_FC_TILE_REGISTER_WORDS << endl;
+            sc_stop();
+            return vector<float>();
+        }
+        return vector<float>(words, init_value);
+    }
 
     unsigned int fc_weight_buffer_base(int buffer_id) const
     {
@@ -339,6 +364,97 @@ SC_MODULE(Controller)
             debug_log(string("Finished DMA write: ") + name + ".");
     }
 
+    void dma_read_to_sram_direct(unsigned int dram_addr,
+                                 unsigned int sram_addr,
+                                 unsigned int words,
+                                 const string &name,
+                                 bool quiet_detail)
+    {
+        if (!global_sram.can_hold(sram_addr, words))
+        {
+            cout << "[ERROR] DMA read-to-SRAM range overflow for " << name
+                 << ": sram_addr=" << sram_addr
+                 << ", words=" << words << endl;
+            sc_stop();
+            return;
+        }
+        optimized_dram_read_words += words;
+        if (!quiet_detail)
+            debug_log(string("DMA read-to-SRAM request: ") + name +
+                      ", words=" + num_to_string(words) + ".");
+        start_dma_command(false, dram_addr, words);
+
+        unsigned int received = 0;
+        unsigned int accumulated_sram_cycles = 0;
+        while (received < words)
+        {
+            dma_read_ready.write(true);
+            wait();
+            if (dma_read_valid.read())
+            {
+                accumulated_sram_cycles +=
+                    global_sram.write_word(sram_addr + received,
+                                           dma_read_data.read());
+                received++;
+                if (words >= DMA_PROGRESS_INTERVAL &&
+                    received % DMA_PROGRESS_INTERVAL == 0)
+                {
+                    debug_log(string("DMA read-to-SRAM progress: ") + name +
+                              ", " + num_to_string(received) + "/" +
+                              num_to_string(words) + " values.");
+                }
+            }
+        }
+        dma_read_ready.write(false);
+        wait_sram_cycles(accumulated_sram_cycles);
+        while (!dma_done.read())
+            wait();
+
+        if (!quiet_detail)
+            debug_log(string("Finished DMA read-to-SRAM: ") + name + ".");
+    }
+
+    void dma_write_from_sram_direct(unsigned int dram_addr,
+                                    unsigned int sram_addr,
+                                    unsigned int words,
+                                    const string &name,
+                                    bool quiet_detail)
+    {
+        if (!global_sram.can_hold(sram_addr, words))
+        {
+            cout << "[ERROR] DMA write-from-SRAM range overflow for " << name
+                 << ": sram_addr=" << sram_addr
+                 << ", words=" << words << endl;
+            sc_stop();
+            return;
+        }
+        optimized_dram_write_words += words;
+        if (!quiet_detail)
+            debug_log(string("DMA write-from-SRAM request: ") + name +
+                      ", words=" + num_to_string(words) + ".");
+        start_dma_command(true, dram_addr, words);
+
+        unsigned int accumulated_sram_cycles = 0;
+        for (unsigned int i = 0; i < words; i++)
+        {
+            float value = 0.0f;
+            accumulated_sram_cycles +=
+                global_sram.read_word(sram_addr + i, value);
+            dma_write_data.write(value);
+            dma_write_valid.write(true);
+            do
+            {
+                wait();
+            } while (!dma_write_ready.read());
+            dma_write_valid.write(false);
+        }
+        wait_sram_cycles(accumulated_sram_cycles);
+        while (!dma_done.read())
+            wait();
+        if (!quiet_detail)
+            debug_log(string("Finished DMA write-from-SRAM: ") + name + ".");
+    }
+
     vector<float> dma_read_vector(unsigned int addr,
                                   int expected,
                                   const string &name,
@@ -346,9 +462,11 @@ SC_MODULE(Controller)
     {
         while (dma_service_busy || dma_service_request)
             wait();
+        dma_service_mode = DMA_SERVICE_READ_VECTOR;
         dma_service_write = false;
         dma_service_quiet = quiet_detail;
         dma_service_addr = addr;
+        dma_service_sram_addr = 0;
         dma_service_words = (unsigned int)expected;
         dma_service_name = name;
         dma_service_write_values.clear();
@@ -366,12 +484,58 @@ SC_MODULE(Controller)
     {
         while (dma_service_busy || dma_service_request)
             wait();
+        dma_service_mode = DMA_SERVICE_WRITE_VECTOR;
         dma_service_write = true;
         dma_service_quiet = quiet_detail;
         dma_service_addr = addr;
+        dma_service_sram_addr = 0;
         dma_service_words = (unsigned int)values.size();
         dma_service_name = name;
         dma_service_write_values = values;
+        dma_service_read_values.clear();
+        dma_service_request = true;
+        dma_service_request_event.notify(SC_ZERO_TIME);
+        wait(dma_service_done_event);
+    }
+
+    void dma_read_to_sram(unsigned int dram_addr,
+                          unsigned int sram_addr,
+                          unsigned int words,
+                          const string &name,
+                          bool quiet_detail = false)
+    {
+        while (dma_service_busy || dma_service_request)
+            wait();
+        dma_service_mode = DMA_SERVICE_READ_TO_SRAM;
+        dma_service_write = false;
+        dma_service_quiet = quiet_detail;
+        dma_service_addr = dram_addr;
+        dma_service_sram_addr = sram_addr;
+        dma_service_words = words;
+        dma_service_name = name;
+        dma_service_write_values.clear();
+        dma_service_read_values.clear();
+        dma_service_request = true;
+        dma_service_request_event.notify(SC_ZERO_TIME);
+        wait(dma_service_done_event);
+    }
+
+    void dma_write_from_sram(unsigned int dram_addr,
+                             unsigned int sram_addr,
+                             unsigned int words,
+                             const string &name,
+                             bool quiet_detail = false)
+    {
+        while (dma_service_busy || dma_service_request)
+            wait();
+        dma_service_mode = DMA_SERVICE_WRITE_FROM_SRAM;
+        dma_service_write = true;
+        dma_service_quiet = quiet_detail;
+        dma_service_addr = dram_addr;
+        dma_service_sram_addr = sram_addr;
+        dma_service_words = words;
+        dma_service_name = name;
+        dma_service_write_values.clear();
         dma_service_read_values.clear();
         dma_service_request = true;
         dma_service_request_event.notify(SC_ZERO_TIME);
@@ -398,18 +562,34 @@ SC_MODULE(Controller)
 
             dma_service_request = false;
             dma_service_busy = true;
-            if (dma_service_write)
+            if (dma_service_mode == DMA_SERVICE_WRITE_VECTOR)
             {
                 dma_write_vector_direct(dma_service_addr,
                                         dma_service_write_values,
                                         dma_service_name,
                                         dma_service_quiet);
             }
-            else
+            else if (dma_service_mode == DMA_SERVICE_READ_VECTOR)
             {
                 dma_service_read_values =
                     dma_read_vector_direct(dma_service_addr,
                                            (int)dma_service_words,
+                                           dma_service_name,
+                                           dma_service_quiet);
+            }
+            else if (dma_service_mode == DMA_SERVICE_READ_TO_SRAM)
+            {
+                dma_read_to_sram_direct(dma_service_addr,
+                                        dma_service_sram_addr,
+                                        dma_service_words,
+                                        dma_service_name,
+                                        dma_service_quiet);
+            }
+            else
+            {
+                dma_write_from_sram_direct(dma_service_addr,
+                                           dma_service_sram_addr,
+                                           dma_service_words,
                                            dma_service_name,
                                            dma_service_quiet);
             }
@@ -1355,23 +1535,18 @@ SC_MODULE(Controller)
                         ((unsigned int)output_index * (unsigned int)in_size +
                          (unsigned int)global_input_start) *
                             4u;
-                    vector<float> weight_segment =
-                        dma_read_vector(weight_addr, seg_words,
-                                        string("FC layer ") +
-                                            num_to_string(layer) +
-                                            " prefetch weight output " +
-                                            num_to_string(output_index) +
-                                            " PE " + num_to_string(pe),
-                                        true);
                     unsigned int sram_addr =
                         weight_buffer_base +
                         (unsigned int)pe * SYSTOLIC_INPUT_TILE_WORDS;
-                    sram_write_only(sram_addr,
-                                    weight_segment,
-                                    string("FC layer ") + num_to_string(layer) +
-                                        " ping-pong weight PE " +
-                                        num_to_string(pe),
-                                    true);
+                    dma_read_to_sram(weight_addr,
+                                     sram_addr,
+                                     (unsigned int)seg_words,
+                                     string("FC layer ") +
+                                         num_to_string(layer) +
+                                         " direct weight output " +
+                                         num_to_string(output_index) +
+                                         " PE " + num_to_string(pe),
+                                     true);
                     tag_fc_weight_sram(sram_addr,
                                        layer,
                                        output_index,
@@ -1441,19 +1616,27 @@ SC_MODULE(Controller)
     }
 
     // Run one fully connected layer through the lecture-style MVM systolic map.
-    vector<float> run_fc_on_pes(const vector<float> &feature,
-                                int layer, int out_size, bool apply_relu)
+    // The bulk activation tensors live in Global SRAM. Controller-side state
+    // for this path is limited to descriptor registers, loop counters, and
+    // small tile registers such as bias/partial-sum/output tiles.
+    void run_fc_on_pes_sram(unsigned int input_sram_base,
+                            int in_size,
+                            unsigned int output_sram_base,
+                            int layer,
+                            int out_size,
+                            bool apply_relu)
     {
         debug_log(string("Starting PE-based systolic FC layer ") + num_to_string(layer) + ".");
-        int in_size = (int)feature.size();
-        vector<float> output(out_size, 0.0f);
         fc_weight_tags.clear();
 
-        // Input activations are staged once in Global SRAM and reused by all
-        // output-neuron tiles. This models an activation scratchpad feeding the
-        // 4x4 PE array.
-        sram_write_only(SRAM_FC_INPUT_BASE, feature,
-                        string("FC layer ") + num_to_string(layer) + " input activation");
+        if (!global_sram.can_hold(input_sram_base, (unsigned int)in_size) ||
+            !global_sram.can_hold(output_sram_base, (unsigned int)out_size))
+        {
+            cout << "[ERROR] FC SRAM activation range overflow for layer "
+                 << layer << endl;
+            sc_stop();
+            return;
+        }
 
         for (int out_base = 0; out_base < out_size; out_base += SYSTOLIC_OUTPUTS_PER_TILE)
         {
@@ -1463,20 +1646,26 @@ SC_MODULE(Controller)
                                      : SYSTOLIC_OUTPUTS_PER_TILE;
 
             unsigned int bias_addr = dram_bias_base(layer) + (unsigned int)out_base * 4u;
-            vector<float> bias_dma =
-                dma_read_vector(bias_addr, active_outputs,
-                                string("FC layer ") + num_to_string(layer) +
-                                    " systolic output bias [" +
-                                    num_to_string(out_base) + ", " +
-                                    num_to_string(out_base + active_outputs - 1) + "]",
-                                true);
+            dma_read_to_sram(bias_addr,
+                             SRAM_FC_BIAS_TILE_BASE,
+                             (unsigned int)active_outputs,
+                             string("FC layer ") + num_to_string(layer) +
+                                 " direct bias tile [" +
+                                 num_to_string(out_base) + ", " +
+                                 num_to_string(out_base + active_outputs - 1) + "]",
+                             true);
             vector<float> bias_tile =
-                sram_stage_block(SRAM_FC_BIAS_TILE_BASE, bias_dma,
-                                 string("FC layer ") + num_to_string(layer) +
-                                     " bias tile",
-                                 true);
+                sram_read_only(SRAM_FC_BIAS_TILE_BASE,
+                               (unsigned int)active_outputs,
+                               string("FC layer ") + num_to_string(layer) +
+                                   " bias tile",
+                               true);
 
-            vector<float> psum_tile(active_outputs, 0.0f);
+            vector<float> psum_tile =
+                make_fc_tile_register(active_outputs,
+                                      string("FC layer ") +
+                                          num_to_string(layer) +
+                                          " psum register");
             for (int local_out = 0; local_out < active_outputs; local_out++)
                 psum_tile[local_out] = bias_tile[local_out];
             sram_write_only(SRAM_FC_PSUM_BASE, psum_tile,
@@ -1534,7 +1723,7 @@ SC_MODULE(Controller)
                         int last_active_pe = west_pe + active_cols - 1;
 
                         vector<float> input_segment =
-                            sram_read_only(SRAM_FC_INPUT_BASE +
+                            sram_read_only(input_sram_base +
                                                (unsigned int)global_input_start,
                                            seg_words,
                                            string("FC layer ") + num_to_string(layer) +
@@ -1649,23 +1838,19 @@ SC_MODULE(Controller)
                                 true);
             }
 
-            vector<float> output_tile(active_outputs, 0.0f);
+            vector<float> output_tile =
+                make_fc_tile_register(active_outputs,
+                                      string("FC layer ") +
+                                          num_to_string(layer) +
+                                          " output register");
             for (int local_out = 0; local_out < active_outputs; local_out++)
                 output_tile[local_out] = psum_tile[local_out];
 
-            sram_write_only(SRAM_FC_OUTPUT_BASE + (unsigned int)out_base,
+            sram_write_only(output_sram_base + (unsigned int)out_base,
                             output_tile,
                             string("FC layer ") + num_to_string(layer) +
                                 " output tile",
                             true);
-            vector<float> committed_tile =
-                sram_read_only(SRAM_FC_OUTPUT_BASE + (unsigned int)out_base,
-                               active_outputs,
-                               string("FC layer ") + num_to_string(layer) +
-                                   " committed output tile",
-                               true);
-            for (int local_out = 0; local_out < active_outputs; local_out++)
-                output[out_base + local_out] = committed_tile[local_out];
 
             int done_outputs = out_base + active_outputs;
             unsigned long long done_macs =
@@ -1686,6 +1871,28 @@ SC_MODULE(Controller)
         }
 
         debug_log(string("Finished PE-based systolic FC layer ") + num_to_string(layer) + ".");
+    }
+
+    // Compatibility helper for experiments. The top-level optimized schedule
+    // uses run_fc_on_pes_sram() so FC layer outputs stay in Global SRAM instead
+    // of returning as large Controller buffers.
+    vector<float> run_fc_on_pes(const vector<float> &feature,
+                                int layer, int out_size, bool apply_relu)
+    {
+        sram_write_only(SRAM_FC_INPUT_BASE, feature,
+                        string("FC layer ") + num_to_string(layer) +
+                            " input activation");
+        run_fc_on_pes_sram(SRAM_FC_INPUT_BASE,
+                           (int)feature.size(),
+                           SRAM_FC_OUTPUT_BASE,
+                           layer,
+                           out_size,
+                           apply_relu);
+        vector<float> output =
+            sram_read_only(SRAM_FC_OUTPUT_BASE,
+                           (unsigned int)out_size,
+                           string("FC layer ") + num_to_string(layer) +
+                               " output activation");
         return output;
     }
 
@@ -1835,6 +2042,7 @@ SC_MODULE(Controller)
         fc_prefetch_done = false;
         dma_service_request = false;
         dma_service_busy = false;
+        dma_service_mode = DMA_SERVICE_READ_VECTOR;
         global_sram.configure(SRAM_CAPACITY_WORDS, 32, 1, 1, SYSTOLIC_SUBARRAYS);
         req_tx.write(false);
         set_rx_ready(false);
@@ -1888,13 +2096,42 @@ SC_MODULE(Controller)
 
         // Fully connected classifier.
         debug_log("Entering fully connected classifier.");
-        feature = run_fc_on_pes(feature, 6, 4096, true);
-        feature = run_fc_on_pes(feature, 7, 4096, true);
-        feature = run_fc_on_pes(feature, 8, 1000, false);
+        sram_write_only(SRAM_FC_INPUT_BASE,
+                        feature,
+                        "FC layer 6 input activation");
+        run_fc_on_pes_sram(SRAM_FC_INPUT_BASE,
+                           (int)feature.size(),
+                           SRAM_FC_OUTPUT_BASE,
+                           6,
+                           4096,
+                           true);
+        run_fc_on_pes_sram(SRAM_FC_OUTPUT_BASE,
+                           4096,
+                           SRAM_FC_INPUT_BASE,
+                           7,
+                           4096,
+                           true);
+        run_fc_on_pes_sram(SRAM_FC_INPUT_BASE,
+                           4096,
+                           SRAM_FC_OUTPUT_BASE,
+                           8,
+                           1000,
+                           false);
 
-        // The final score vector is committed to DRAM before being checked or printed.
-        dma_write_vector(DRAM_OUTPUT_BASE, feature, "fc8 output scores");
-        vector<float> dram_output = dma_read_vector(DRAM_OUTPUT_BASE, 1000, "fc8 output scores");
+        // The final score buffer is committed from Global SRAM to DRAM before
+        // being read back and printed.
+        dma_write_from_sram(DRAM_OUTPUT_BASE,
+                            SRAM_FC_OUTPUT_BASE,
+                            1000,
+                            "fc8 output scores");
+        dma_read_to_sram(DRAM_OUTPUT_BASE,
+                         SRAM_FC_OUTPUT_BASE,
+                         1000,
+                         "fc8 output scores readback");
+        vector<float> dram_output =
+            sram_read_only(SRAM_FC_OUTPUT_BASE,
+                           1000,
+                           "fc8 output scores readback");
 
         // Output conversion and report.
         debug_log("Computing softmax and printing Top-100 output.");
@@ -1912,6 +2149,7 @@ SC_MODULE(Controller)
         fc_prefetch_done = false;
         dma_service_request = false;
         dma_service_busy = false;
+        dma_service_mode = DMA_SERVICE_READ_VECTOR;
         SC_THREAD(run);
         sensitive << clk.pos();
         SC_THREAD(dma_service_thread);

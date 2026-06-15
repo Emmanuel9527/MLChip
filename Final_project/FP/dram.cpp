@@ -5,6 +5,28 @@
 #include <iostream>
 #include <sstream>
 
+static sc_uint<32> float_to_axi_word(float value)
+{
+    union
+    {
+        float f;
+        unsigned int u;
+    } bits;
+    bits.f = value;
+    return bits.u;
+}
+
+static float axi_word_to_float(sc_uint<32> value)
+{
+    union
+    {
+        float f;
+        unsigned int u;
+    } bits;
+    bits.u = value.to_uint();
+    return bits.f;
+}
+
 string DRAM::find_data_path()
 {
     const char *env_path = getenv("DATA_PATH");
@@ -120,8 +142,9 @@ void DRAM::run()
     rlast.write(false);
     awready.write(false);
     wready.write(false);
+    bresp.write(0u);
     bvalid.write(false);
-    rdata.write(0.0f);
+    rdata.write(0u);
 
     while (!reset_n.read())
         wait();
@@ -140,17 +163,37 @@ void DRAM::run()
             unsigned int addr = araddr.read();
             unsigned int beats = arlen.read() + 1u;
             unsigned int step = 1u << arsize.read();
+#if defined(FP_TRACE)
+            if (addr < 0x100u)
+            {
+                cout << "[TRACE] DRAM accepted AR addr=0x"
+                     << hex << addr << dec
+                     << ", beats=" << beats << endl;
+            }
+#endif
             arready.write(false);
             awready.write(false);
 
             for (unsigned int beat = 0; beat < beats; beat++)
             {
-                rdata.write(read_word(addr + beat * step));
+                rdata.write(float_to_axi_word(read_word(addr + beat * step)));
                 rlast.write(beat + 1u == beats);
                 rvalid.write(true);
+                unsigned int wait_cycles = 0;
                 do
                 {
                     wait();
+#if defined(FP_TRACE)
+                    wait_cycles++;
+                    if (wait_cycles % 100000 == 0)
+                    {
+                        cout << "[TRACE] DRAM waiting RREADY, addr=0x"
+                             << hex << (addr + beat * step) << dec
+                             << ", beat=" << beat
+                             << ", rvalid=" << rvalid.read()
+                             << ", rready=" << rready.read() << endl;
+                    }
+#endif
                 } while (!rready.read());
                 rvalid.write(false);
                 rlast.write(false);
@@ -175,13 +218,15 @@ void DRAM::run()
                 {
                     wait();
                 } while (!wvalid.read());
-                write_word(addr + beat * step, wdata.read());
+                write_word(addr + beat * step, axi_word_to_float(wdata.read()));
                 bool last = wlast.read();
                 wready.write(false);
                 wait();
                 (void)last;
             }
 
+            // BRESP=0 models AXI OKAY for this simplified DRAM.
+            bresp.write(0u);
             bvalid.write(true);
             do
             {

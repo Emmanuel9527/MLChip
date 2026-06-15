@@ -88,6 +88,22 @@ public:
         return cycles;
     }
 
+    unsigned int write_word(unsigned int addr, float value)
+    {
+        if (!can_hold(addr, 1))
+        {
+            cout << "Global SRAM overflow on write_word." << endl;
+            return 0;
+        }
+        storage[addr] = value;
+        write_words++;
+        write_ops++;
+        if (addr + 1 > peak_used_words)
+            peak_used_words = addr + 1;
+        modeled_cycles += write_latency_cycles;
+        return write_latency_cycles;
+    }
+
     unsigned int read_block(unsigned int addr, unsigned int words, vector<float> &out)
     {
         if (!can_hold(addr, words))
@@ -102,6 +118,21 @@ public:
         unsigned int cycles = read_latency_cycles * words;
         modeled_cycles += cycles;
         return cycles;
+    }
+
+    unsigned int read_word(unsigned int addr, float &out)
+    {
+        if (!can_hold(addr, 1))
+        {
+            cout << "Global SRAM overflow on read_word." << endl;
+            out = 0.0f;
+            return 0;
+        }
+        out = storage[addr];
+        read_words++;
+        read_ops++;
+        modeled_cycles += read_latency_cycles;
+        return read_latency_cycles;
     }
 
     void print_metrics(const string &label) const

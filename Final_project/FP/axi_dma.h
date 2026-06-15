@@ -35,7 +35,7 @@ SC_MODULE(AxiDma)
     sc_in<bool> arready;
 
     // AXI4-like read data channel.
-    sc_in<float> rdata;
+    sc_in<sc_uint<32> > rdata;
     sc_in<bool> rvalid;
     sc_out<bool> rready;
     sc_in<bool> rlast;
@@ -48,12 +48,13 @@ SC_MODULE(AxiDma)
     sc_in<bool> awready;
 
     // AXI4-like write data channel.
-    sc_out<float> wdata;
+    sc_out<sc_uint<32> > wdata;
     sc_out<bool> wvalid;
     sc_in<bool> wready;
     sc_out<bool> wlast;
 
     // AXI4-like write response channel.
+    sc_in<unsigned int> bresp;
     sc_in<bool> bvalid;
     sc_out<bool> bready;
 

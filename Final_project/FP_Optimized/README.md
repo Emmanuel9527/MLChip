@@ -67,7 +67,14 @@ DRAM -> AXI DMA -> Global SRAM scratchpad -> NoC HOST port -> PE0..PE15 systolic
 ```
 
 For each FC layer, the controller first stages the input activation vector in
-SRAM. It then treats the original 4x4 PE mesh as two independent 2x4 MVM
+SRAM. Large tensor transfers use DMA descriptors instead of Controller-owned
+bulk buffers: FC weight tiles and bias tiles are moved directly from DRAM into
+Global SRAM, and the final FC8 score buffer is written from Global SRAM back to
+DRAM. The Controller keeps schedule counters, DMA descriptors, NoC packet
+metadata, and small tile/result vectors needed by the behavioral conv/pool
+front-end; it does not hold FC weight tiles as an uncounted local memory.
+
+The FC scheduler treats the original 4x4 PE mesh as two independent 2x4 MVM
 sub-arrays. Each sub-array processes up to four output neurons, so one FC tile
 computes up to eight output neurons. For each input tile, the controller splits
 the input dimension into two row segments per sub-array. The input-vector
@@ -87,12 +94,35 @@ The SRAM model is defined in `global_sram.h`:
 - Write latency: 1 modeled cycle per word
 - FC weight staging uses two ping-pong regions in Global SRAM so the active
   tile's weight buffer is not overwritten by the next staged tile.
-- A Controller-side FC weight prefetch thread overlaps AXI DMA prefetch for
-  input tile `k + 1` with systolic PE computation of input tile `k`.
+- A Controller-side FC weight prefetch thread issues DMA-to-SRAM descriptors
+  for input tile `k + 1` while the systolic PE array computes input tile `k`.
+- FC output tiles are committed to the Global SRAM output buffer first. The
+  final classifier output is then written to DRAM by DMA reading directly from
+  that SRAM buffer.
 
 To keep SystemC simulation practical, the full SRAM cycle cost is accumulated
 in metrics while the simulator advances one synchronization cycle per SRAM
 block access.
+
+## Controller Register Model
+
+The optimized FC classifier avoids treating the Controller as an unbounded data
+buffer. Bulk tensor data is stored in Global SRAM, and the Controller keeps only
+hardware-sized state:
+
+- DMA descriptor/status registers: source address, destination SRAM address,
+  transfer length, transfer mode, valid/busy/done state
+- FC tile register file: up to 8 words for bias, partial sums, output tile
+  values, and result bookkeeping for one systolic output tile
+- NoC packet serialization buffers: temporary payload staging used to model a
+  flit transmitter/receiver interface
+- Loop counters and address-generation registers for layer scheduling
+
+FC6, FC7, and FC8 activations are ping-ponged between the Global SRAM input and
+output activation regions. The Controller no longer passes FC layer outputs as
+large `vector<float>` buffers. The remaining large `vector<float>` tensors in
+the optimized source belong to the legacy behavioral convolution/pooling
+front-end inherited from HW4; they are not used as hidden FC storage.
 
 The systolic FC behavior is implemented in the original PE model:
 
@@ -304,8 +334,17 @@ The DMA supports:
 - Read data channel: `RDATA`, `RVALID`, `RREADY`, `RLAST`
 - Write address channel: `AWADDR`, `AWLEN`, `AWSIZE`, `AWVALID`, `AWREADY`
 - Write data channel: `WDATA`, `WVALID`, `WREADY`, `WLAST`
-- Write response channel: `BVALID`, `BREADY`
-- Burst transfers with up to 16 32-bit float beats per burst
+- Write response channel: `BRESP`, `BVALID`, `BREADY`
+- Burst transfers with up to 16 32-bit data beats per burst. `RDATA` and
+  `WDATA` are modeled as `sc_uint<32>` AXI words carrying IEEE-754 single
+  precision float bit patterns.
+
+In the optimized FC path, the DMA service supports four descriptor modes:
+
+- DRAM to Controller stream, used by the legacy behavioral conv/pool front-end
+- Controller stream to DRAM, used by the writeback test path
+- DRAM to Global SRAM, used for FC weight and bias staging
+- Global SRAM to DRAM, used for final FC8 output writeback
 
 The DRAM slave uses an idle-ready model for the address channels: `ARREADY`
 and `AWREADY` may be asserted before the DMA asserts `ARVALID` or `AWVALID`.
@@ -316,7 +355,8 @@ Outstanding transactions are not implemented in this optimized version.
 
 ## DRAM Memory Map
 
-All addresses are byte addresses and each value is a 32-bit float.
+All addresses are byte addresses and each stored value is an IEEE-754 32-bit
+float. On the AXI bus, the value is transferred as a raw 32-bit word.
 
 | Region | Base Address |
 | --- | --- |

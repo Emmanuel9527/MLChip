@@ -22,7 +22,7 @@ SC_MODULE(DRAM)
     sc_out<bool> arready;
 
     // DRAM to DMA read data signals.
-    sc_out<float> rdata;
+    sc_out<sc_uint<32> > rdata;
     sc_out<bool> rvalid;
     sc_in<bool> rready;
     sc_out<bool> rlast;
@@ -35,12 +35,13 @@ SC_MODULE(DRAM)
     sc_out<bool> awready;
 
     // DMA to DRAM write data signals.
-    sc_in<float> wdata;
+    sc_in<sc_uint<32> > wdata;
     sc_in<bool> wvalid;
     sc_out<bool> wready;
     sc_in<bool> wlast;
 
     // DRAM to DMA write response signals.
+    sc_out<unsigned int> bresp;
     sc_out<bool> bvalid;
     sc_in<bool> bready;
 

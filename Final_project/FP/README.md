@@ -57,8 +57,10 @@ The DMA supports:
 - Read data channel: `RDATA`, `RVALID`, `RREADY`, `RLAST`
 - Write address channel: `AWADDR`, `AWLEN`, `AWSIZE`, `AWVALID`, `AWREADY`
 - Write data channel: `WDATA`, `WVALID`, `WREADY`, `WLAST`
-- Write response channel: `BVALID`, `BREADY`
-- Burst transfers with up to 16 32-bit float beats per burst
+- Write response channel: `BRESP`, `BVALID`, `BREADY`
+- Burst transfers with up to 16 32-bit data beats per burst. `RDATA` and
+  `WDATA` are modeled as `sc_uint<32>` AXI words carrying IEEE-754 single
+  precision float bit patterns.
 
 The DRAM slave uses an idle-ready model for the address channels: `ARREADY`
 and `AWREADY` may be asserted before the DMA asserts `ARVALID` or `AWVALID`.
@@ -69,7 +71,8 @@ Outstanding transactions are not implemented in this baseline.
 
 ## DRAM Memory Map
 
-All addresses are byte addresses and each value is a 32-bit float.
+All addresses are byte addresses and each stored value is an IEEE-754 32-bit
+float. On the AXI bus, the value is transferred as a raw 32-bit word.
 
 | Region | Base Address |
 | --- | --- |

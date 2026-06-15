@@ -7,6 +7,28 @@ using namespace std;
 static const unsigned int AXI_BURST_MAX_BEATS = 16;
 static const unsigned int AXI_FLOAT_SIZE_LOG2 = 2;
 
+static sc_uint<32> float_to_axi_word(float value)
+{
+    union
+    {
+        float f;
+        unsigned int u;
+    } bits;
+    bits.f = value;
+    return bits.u;
+}
+
+static float axi_word_to_float(sc_uint<32> value)
+{
+    union
+    {
+        float f;
+        unsigned int u;
+    } bits;
+    bits.u = value.to_uint();
+    return bits.f;
+}
+
 void AxiDma::read_burst(unsigned int addr, unsigned int beats)
 {
 #if defined(FP_TRACE)
@@ -64,7 +86,7 @@ void AxiDma::read_burst(unsigned int addr, unsigned int beats)
             }
 #endif
         } while (!rvalid.read());
-        float value = rdata.read();
+        float value = axi_word_to_float(rdata.read());
         (void)rlast.read();
         rready.write(false);
         read_data.write(value);
@@ -128,7 +150,7 @@ void AxiDma::write_burst(unsigned int addr, unsigned int beats)
         write_ready.write(false);
 
         // DMA accepts the word and sends it to DRAM.
-        wdata.write(value);
+        wdata.write(float_to_axi_word(value));
         wlast.write(i + 1u == beats);
         wvalid.write(true);
         do
@@ -146,6 +168,11 @@ void AxiDma::write_burst(unsigned int addr, unsigned int beats)
     {
         wait();
     } while (!bvalid.read());
+    unsigned int response = bresp.read();
+#if defined(FP_TRACE)
+    if (response != 0u)
+        cout << "[TRACE] DMA write response BRESP=" << response << endl;
+#endif
     bready.write(false);
     write_bursts++;
 }
@@ -164,7 +191,7 @@ void AxiDma::run()
     wlast.write(false);
     bready.write(false);
     read_data.write(0.0f);
-    wdata.write(0.0f);
+    wdata.write(0u);
 
     while (!reset_n.read())
         wait();
