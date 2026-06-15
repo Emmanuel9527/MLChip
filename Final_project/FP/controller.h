@@ -1061,12 +1061,29 @@ SC_MODULE(Controller)
                 ? 0.0
                 : (double)baseline_noc_tx_cycles /
                       (double)baseline_noc_tx_flits;
+        unsigned long long pe_mac_ops = PE::total_mac_ops();
+        unsigned long long pe_compute_cycles = PE::total_compute_cycles();
+        unsigned long long pe_compute_capacity =
+            pe_compute_cycles *
+            (unsigned long long)BASELINE_PE_MACS_PER_CYCLE;
+        double pe_compute_utilization =
+            (pe_compute_capacity == 0)
+                ? 0.0
+                : (double)pe_mac_ops * 100.0 /
+                      (double)pe_compute_capacity;
 
         cout << "========== Baseline Design Metrics ==========" << endl;
         cout << "Number of PEs: " << WORKER_COUNT << endl;
         cout << "MAC units per PE: " << BASELINE_PE_MACS_PER_CYCLE << endl;
         cout << "Total MAC units: "
              << (WORKER_COUNT * BASELINE_PE_MACS_PER_CYCLE) << endl;
+        cout << "Baseline PE compute jobs: "
+             << PE::total_compute_jobs() << endl;
+        cout << "Baseline PE MAC ops: " << pe_mac_ops << endl;
+        cout << "Baseline PE active compute cycles: "
+             << pe_compute_cycles << endl;
+        cout << "Estimated baseline PE compute utilization (%): "
+             << pe_compute_utilization << endl;
         cout << "Local SRAM per PE bytes: 0" << endl;
         cout << "Total on-chip SRAM bytes: 0" << endl;
         cout << "SRAM bit width: N/A" << endl;
@@ -1211,6 +1228,7 @@ SC_MODULE(Controller)
         baseline_noc_packets = 0;
         baseline_noc_tx_flits = 0;
         baseline_noc_tx_cycles = 0;
+        PE::reset_metrics();
         SC_THREAD(run);
         sensitive << clk.pos();
     }

@@ -36,6 +36,56 @@ SC_MODULE(PE)
 {
     static const int MACS_PER_CYCLE = 64;
 
+    static unsigned long long &metric_mac_ops()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
+    static unsigned long long &metric_compute_cycles()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
+    static unsigned long long &metric_compute_jobs()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
+    static void reset_metrics()
+    {
+        metric_mac_ops() = 0;
+        metric_compute_cycles() = 0;
+        metric_compute_jobs() = 0;
+    }
+
+    static void record_macs(long long mac_count)
+    {
+        unsigned long long cycles =
+            (unsigned long long)((mac_count + MACS_PER_CYCLE - 1) /
+                                 MACS_PER_CYCLE);
+        metric_mac_ops() += (unsigned long long)mac_count;
+        metric_compute_cycles() += cycles;
+        metric_compute_jobs()++;
+    }
+
+    static unsigned long long total_mac_ops()
+    {
+        return metric_mac_ops();
+    }
+
+    static unsigned long long total_compute_cycles()
+    {
+        return metric_compute_cycles();
+    }
+
+    static unsigned long long total_compute_jobs()
+    {
+        return metric_compute_jobs();
+    }
+
     // PE id matches the local router/core id in the 4x4 mesh.
     int id;
 
@@ -54,6 +104,7 @@ SC_MODULE(PE)
     void wait_for_macs(long long mac_count)
     {
         long long cycles = (mac_count + MACS_PER_CYCLE - 1) / MACS_PER_CYCLE;
+        record_macs(mac_count);
         for (long long i = 0; i < cycles; i++)
             wait();
     }

@@ -59,20 +59,29 @@ searches for the data folder in this order:
 ## Optimization Method
 
 The optimized design keeps the baseline 4x4 NoC, router, core, and PE compute
-modules for convolution and pooling. The main change is the FC dataflow and
-memory hierarchy:
+modules, but moves the convolution/pooling bulk tensors and the FC classifier
+dataflow into an explicit SRAM-backed memory hierarchy:
 
 ```text
 DRAM -> AXI DMA -> Global SRAM scratchpad -> NoC HOST port -> PE0..PE15 systolic array -> Global SRAM output buffer
 ```
 
-For each FC layer, the controller first stages the input activation vector in
-SRAM. Large tensor transfers use DMA descriptors instead of Controller-owned
-bulk buffers: FC weight tiles and bias tiles are moved directly from DRAM into
-Global SRAM, and the final FC8 score buffer is written from Global SRAM back to
-DRAM. The Controller keeps schedule counters, DMA descriptors, NoC packet
-metadata, and small tile/result vectors needed by the behavioral conv/pool
-front-end; it does not hold FC weight tiles as an uncounted local memory.
+Convolution and pooling activations are ping-ponged between two Global SRAM
+regions. Convolution weights and biases are moved from DRAM to Global SRAM by
+DMA before each layer. For NoC load packets, the Controller streams SRAM words
+directly into flit lanes instead of first building a full payload vector. The
+PEs store the received input, weight, and bias data in PE-local SRAM, execute
+the behavioral compute kernel, and return result slices that are written back
+to Global SRAM. Therefore, conv/pool layers no longer pass full-layer feature,
+weight, or output tensors through Controller-owned persistent buffers.
+
+For each FC layer, the input activation is already in SRAM. Large tensor
+transfers use DMA descriptors instead of Controller-owned bulk buffers: FC
+weight tiles and bias tiles are moved directly from DRAM into Global SRAM, and
+the final FC8 score buffer is written from Global SRAM back to DRAM. The
+Controller keeps schedule counters, DMA descriptors, NoC packet metadata, and
+small tile/result registers; it does not hold full-layer tensors as uncounted
+local memory.
 
 The FC scheduler treats the original 4x4 PE mesh as two independent 2x4 MVM
 sub-arrays. Each sub-array processes up to four output neurons, so one FC tile
@@ -106,7 +115,7 @@ block access.
 
 ## Controller Register Model
 
-The optimized FC classifier avoids treating the Controller as an unbounded data
+The optimized design avoids treating the Controller as an unbounded data
 buffer. Bulk tensor data is stored in Global SRAM, and the Controller keeps only
 hardware-sized state:
 
@@ -114,15 +123,15 @@ hardware-sized state:
   transfer length, transfer mode, valid/busy/done state
 - FC tile register file: up to 8 words for bias, partial sums, output tile
   values, and result bookkeeping for one systolic output tile
-- NoC packet serialization buffers: temporary payload staging used to model a
-  flit transmitter/receiver interface
+- NoC packet serialization state: SRAM-backed transmit streaming packs one flit
+  at a time. Receive-side packet reconstruction is treated as the NoC RX
+  buffer used to write returned PE result slices back to SRAM.
 - Loop counters and address-generation registers for layer scheduling
 
-FC6, FC7, and FC8 activations are ping-ponged between the Global SRAM input and
-output activation regions. The Controller no longer passes FC layer outputs as
-large `vector<float>` buffers. The remaining large `vector<float>` tensors in
-the optimized source belong to the legacy behavioral convolution/pooling
-front-end inherited from HW4; they are not used as hidden FC storage.
+Conv/pool activations are ping-ponged between Global SRAM conv buffers, and
+FC6, FC7, and FC8 activations are ping-ponged between SRAM activation regions.
+The top-level optimized schedule no longer passes conv, pool, or FC layer
+outputs as large `vector<float>` buffers.
 
 The systolic FC behavior is implemented in the original PE model:
 

@@ -153,6 +153,10 @@ SC_MODULE(Controller)
     static const unsigned int SRAM_FC_BIAS_TILE_BASE = 196608;
     static const unsigned int SRAM_FC_PSUM_BASE = 200704;
     static const unsigned int SRAM_FC_OUTPUT_BASE = 204800;
+    static const unsigned int SRAM_CONV_BUF_A_BASE = 0;
+    static const unsigned int SRAM_CONV_BUF_B_BASE = 262144;
+    static const unsigned int SRAM_CONV_WEIGHT_BASE = 524288;
+    static const unsigned int SRAM_CONV_BIAS_BASE = 1500000;
     static const int SYSTOLIC_ARRAY_ROWS = 4;
     static const int SYSTOLIC_ARRAY_COLS = 4;
     static const int SYSTOLIC_SUBARRAY_ROWS = 2;
@@ -601,17 +605,6 @@ SC_MODULE(Controller)
         }
     }
 
-    vector<float> read_dram_tensor(int id, bool type, int expected)
-    {
-        unsigned int base = dram_tensor_base(id, type);
-        string name;
-        if (id == 0)
-            name = "input image";
-        else
-            name = string("layer ") + num_to_string(id) + (type ? " bias" : " weight");
-        return dma_read_vector(base, expected, name);
-    }
-
     void wait_sram_cycles(unsigned int cycles)
     {
         optimized_sram_wait_cycles += cycles;
@@ -664,6 +657,92 @@ SC_MODULE(Controller)
             debug_log(string("SRAM read: ") + name +
                       ", words=" + num_to_string(out.size()) + ".");
         return out;
+    }
+
+    float sram_read_word_only(unsigned int sram_addr)
+    {
+        float value = 0.0f;
+        wait_sram_cycles(global_sram.read_word(sram_addr, value));
+        return value;
+    }
+
+    void sram_write_word_only(unsigned int sram_addr, float value)
+    {
+        wait_sram_cycles(global_sram.write_word(sram_addr, value));
+    }
+
+    void zero_region_sram(unsigned int sram_addr, unsigned int words)
+    {
+        if (!global_sram.can_hold(sram_addr, words))
+        {
+            cout << "[ERROR] SRAM zero range overflow: addr=" << sram_addr
+                 << ", words=" << words << endl;
+            sc_stop();
+            return;
+        }
+        for (unsigned int i = 0; i < words; i++)
+            sram_write_word_only(sram_addr + i, 0.0f);
+    }
+
+    void pad_tensor_sram(unsigned int input_base,
+                         unsigned int output_base,
+                         int in_h, int in_w, int ch,
+                         int pad,
+                         const string &name)
+    {
+        int out_h = in_h + 2 * pad;
+        int out_w = in_w + 2 * pad;
+        unsigned int output_words = (unsigned int)(out_h * out_w * ch);
+        debug_log(string("SRAM padding: ") + name +
+                  ", words=" + num_to_string(output_words) + ".");
+        zero_region_sram(output_base, output_words);
+        for (int c = 0; c < ch; c++)
+        {
+            for (int h = 0; h < in_h; h++)
+            {
+                for (int w = 0; w < in_w; w++)
+                {
+                    unsigned int src =
+                        input_base + (unsigned int)idx3(c, h, w, in_h, in_w);
+                    unsigned int dst =
+                        output_base +
+                        (unsigned int)idx3(c, h + pad, w + pad, out_h, out_w);
+                    sram_write_word_only(dst, sram_read_word_only(src));
+                }
+            }
+        }
+    }
+
+    void pad_tensor_sram_to_shape(unsigned int input_base,
+                                  unsigned int output_base,
+                                  int in_h, int in_w, int ch,
+                                  int out_h, int out_w,
+                                  int h_offset, int w_offset,
+                                  const string &name)
+    {
+        unsigned int output_words = (unsigned int)(out_h * out_w * ch);
+        debug_log(string("SRAM padding: ") + name +
+                  ", words=" + num_to_string(output_words) + ".");
+        zero_region_sram(output_base, output_words);
+        for (int c = 0; c < ch; c++)
+        {
+            for (int h = 0; h < in_h; h++)
+            {
+                for (int w = 0; w < in_w; w++)
+                {
+                    unsigned int src =
+                        input_base + (unsigned int)idx3(c, h, w, in_h, in_w);
+                    unsigned int dst =
+                        output_base +
+                        (unsigned int)idx3(c,
+                                           h + h_offset,
+                                           w + w_offset,
+                                           out_h,
+                                           out_w);
+                    sram_write_word_only(dst, sram_read_word_only(src));
+                }
+            }
+        }
     }
 
     void wait_systolic_cycles(unsigned int cycles)
@@ -761,6 +840,63 @@ SC_MODULE(Controller)
                           num_to_string(payload_flits) +
                           " packed flits.");
             }
+        }
+    }
+
+    void send_load_packet_from_sram(int dest,
+                                    int op,
+                                    int layer,
+                                    unsigned int sram_addr,
+                                    unsigned int words)
+    {
+        optimized_noc_packets++;
+        unsigned int total_payload_words = words + 3u;
+        optimized_noc_payload_words += total_payload_words;
+
+        Flit header;
+        header = 0;
+        set_flit_type(header, NOC_HEAD_FLIT);
+        set_flit_count(header, 0);
+        set_header_fields(header, dest, CONTROLLER_ID);
+        send_flit(header);
+
+        unsigned int payload_index = 0;
+        while (payload_index < total_payload_words)
+        {
+            int count = (int)min((unsigned int)PACKED_FLIT_WORDS,
+                                 total_payload_words - payload_index);
+            bool last = (payload_index + (unsigned int)count ==
+                         total_payload_words);
+
+            Flit flit;
+            flit = 0;
+            set_flit_type(flit, last ? NOC_TAIL_FLIT : NOC_BODY_FLIT);
+            set_flit_count(flit, count);
+
+            for (int lane = 0; lane < count; lane++)
+            {
+                unsigned int word_index = payload_index + (unsigned int)lane;
+                float value = 0.0f;
+                if (word_index == 0)
+                    value = (float)op;
+                else if (word_index == 1)
+                    value = (float)layer;
+                else if (word_index == 2)
+                    value = (float)words;
+                else
+                    value = sram_read_word_only(sram_addr + word_index - 3u);
+
+                union
+                {
+                    float fval;
+                    unsigned int ival;
+                } converter;
+                converter.fval = value;
+                set_flit_word(flit, lane, converter.ival);
+            }
+
+            send_flit(flit);
+            payload_index += (unsigned int)count;
         }
     }
 
@@ -1101,46 +1237,6 @@ SC_MODULE(Controller)
         }
     }
 
-    // Initial image padding before conv1.
-    vector<float> zero_pad_224_to_227(const vector<float> &input)
-    {
-        vector<float> output(ZP_H * ZP_W * IMG_C, 0.0f);
-        for (int c = 0; c < IMG_C; c++)
-            for (int h = 0; h < IMG_H; h++)
-                for (int w = 0; w < IMG_W; w++)
-                    output[idx3(c, h + 2, w + 2, ZP_H, ZP_W)] =
-                        input[idx3(c, h, w, IMG_H, IMG_W)];
-        return output;
-    }
-
-    // Generic symmetric padding used before conv2..conv5.
-    vector<float> pad_layer(const vector<float> &input, int in_h, int in_w, int ch, int pad)
-    {
-        int out_h = in_h + 2 * pad;
-        int out_w = in_w + 2 * pad;
-        vector<float> output(out_h * out_w * ch, 0.0f);
-
-        for (int c = 0; c < ch; c++)
-            for (int h = 0; h < in_h; h++)
-                for (int w = 0; w < in_w; w++)
-                    output[idx3(c, h + pad, w + pad, out_h, out_w)] =
-                        input[idx3(c, h, w, in_h, in_w)];
-        return output;
-    }
-
-    // Extract the weight rows needed by one PE's output-channel slice.
-    vector<float> slice_conv_weight(const vector<float> &weight,
-                                    int oc_start, int oc_count,
-                                    int in_ch, int kernel)
-    {
-        int per_oc = in_ch * kernel * kernel;
-        vector<float> part(oc_count * per_oc);
-        for (int oc = 0; oc < oc_count; oc++)
-            for (int i = 0; i < per_oc; i++)
-                part[oc * per_oc + i] = weight[(oc_start + oc) * per_oc + i];
-        return part;
-    }
-
     // Extract the FC matrix rows needed by one PE's output-neuron slice.
     vector<float> slice_fc_weight(const vector<float> &weight,
                                   int o_start, int o_count,
@@ -1322,8 +1418,8 @@ SC_MODULE(Controller)
         return packet;
     }
 
-    // Merge a PE result packet that contains one contiguous channel slice.
-    void merge_channel_result(vector<float> & output, const Packet &result)
+    void merge_channel_result_to_sram(unsigned int output_base,
+                                      const Packet &result)
     {
         int p = 0;
         int job_id = (int)result.datas[p++];
@@ -1331,56 +1427,99 @@ SC_MODULE(Controller)
         int count = (int)result.datas[p++];
         int out_h = (int)result.datas[p++];
         int out_w = (int)result.datas[p++];
+        unsigned int cycles = 0;
 
         for (int local = 0; local < count; local++)
+        {
             for (int i = 0; i < out_h * out_w; i++)
-                output[(start + local) * out_h * out_w + i] = result.datas[p++];
-
+            {
+                unsigned int dst =
+                    output_base +
+                    (unsigned int)((start + local) * out_h * out_w + i);
+                cycles += global_sram.write_word(dst, result.datas[p++]);
+            }
+        }
+        wait_sram_cycles(cycles);
         (void)job_id;
     }
 
-    // Run one convolution layer through worker PEs.
-    // The Controller first preloads each PE's local input/weight/bias buffers,
-    // then dispatches all compute commands before collecting output slices.
-    vector<float> run_conv_on_pes(vector<float> & feature,
-                                  int layer,
-                                  int in_h, int in_w, int in_ch,
-                                  int out_ch, int kernel, int stride)
+    void run_conv_on_pes_sram(unsigned int input_base,
+                              unsigned int output_base,
+                              int layer,
+                              int in_h, int in_w, int in_ch,
+                              int out_ch, int kernel, int stride)
     {
-        debug_log(string("Starting CONV layer ") + num_to_string(layer) + ".");
+        debug_log(string("Starting SRAM-resident CONV layer ") +
+                  num_to_string(layer) + ".");
         int weight_count = out_ch * in_ch * kernel * kernel;
-        vector<float> weight = read_dram_tensor(layer, false, weight_count);
-        vector<float> bias = read_dram_tensor(layer, true, out_ch);
         int out_h = (in_h - kernel) / stride + 1;
         int out_w = (in_w - kernel) / stride + 1;
-        vector<float> output(out_h * out_w * out_ch, 0.0f);
+        unsigned int input_words = (unsigned int)(in_h * in_w * in_ch);
+        unsigned int output_words = (unsigned int)(out_h * out_w * out_ch);
+        unsigned int filter_words = (unsigned int)(in_ch * kernel * kernel);
+
+        if (!global_sram.can_hold(input_base, input_words) ||
+            !global_sram.can_hold(output_base, output_words))
+        {
+            cout << "[ERROR] CONV SRAM activation range overflow for layer "
+                 << layer << endl;
+            sc_stop();
+            return;
+        }
+
+        dma_read_to_sram(dram_weight_base(layer),
+                         SRAM_CONV_WEIGHT_BASE,
+                         (unsigned int)weight_count,
+                         string("conv") + num_to_string(layer) +
+                             " weight tensor",
+                         true);
+        dma_read_to_sram(dram_bias_base(layer),
+                         SRAM_CONV_BIAS_BASE,
+                         (unsigned int)out_ch,
+                         string("conv") + num_to_string(layer) +
+                             " bias tensor",
+                         true);
+
+        debug_log(string("Streaming CONV layer ") + num_to_string(layer) +
+                  " input from SRAM to worker PEs, values=" +
+                  num_to_string(input_words) + ".");
+        send_load_packet_from_sram(BROADCAST_WORKERS,
+                                   OP_LOAD_INPUT,
+                                   layer,
+                                   input_base,
+                                   input_words);
+        wait_for_load_acks(WORKER_COUNT, "SRAM input broadcast");
 
         vector<int> workers;
         vector<int> starts;
         vector<int> counts;
-
-        broadcast_input_to_workers(layer, feature);
 
         int base = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < out_ch; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
             int oc_count = (out_ch - base + remaining_workers - 1) / remaining_workers;
-            vector<float> weight_part = slice_conv_weight(weight, base, oc_count, in_ch, kernel);
-            vector<float> bias_part(bias.begin() + base, bias.begin() + base + oc_count);
-
-            debug_log(string("Preloading CONV layer ") + num_to_string(layer) +
-                      " worker PE " + num_to_string(worker) +
-                      ", output channels [" + num_to_string(base) + ", " +
-                      num_to_string(base + oc_count - 1) + "].");
-            send_packet(make_load_packet(worker, OP_LOAD_WEIGHT, layer, weight_part));
+            send_load_packet_from_sram(worker,
+                                       OP_LOAD_WEIGHT,
+                                       layer,
+                                       SRAM_CONV_WEIGHT_BASE +
+                                           (unsigned int)base * filter_words,
+                                       (unsigned int)oc_count * filter_words);
             wait_for_load_ack_op(worker, OP_LOAD_WEIGHT,
                                  string("CONV layer ") + num_to_string(layer) +
-                                     " weight for PE " + num_to_string(worker));
-            send_packet(make_load_packet(worker, OP_LOAD_BIAS, layer, bias_part));
+                                     " SRAM weight for PE " +
+                                     num_to_string(worker),
+                                 true);
+            send_load_packet_from_sram(worker,
+                                       OP_LOAD_BIAS,
+                                       layer,
+                                       SRAM_CONV_BIAS_BASE + (unsigned int)base,
+                                       (unsigned int)oc_count);
             wait_for_load_ack_op(worker, OP_LOAD_BIAS,
                                  string("CONV layer ") + num_to_string(layer) +
-                                     " bias for PE " + num_to_string(worker));
+                                     " SRAM bias for PE " +
+                                     num_to_string(worker),
+                                 true);
 
             workers.push_back(worker);
             starts.push_back(base);
@@ -1392,10 +1531,9 @@ SC_MODULE(Controller)
         {
             int job_id = next_job_id++;
             Packet packet = make_conv_compute(workers[i], job_id,
-                                              in_h, in_w, in_ch, out_ch, kernel, stride,
+                                              in_h, in_w, in_ch, out_ch,
+                                              kernel, stride,
                                               starts[i], counts[i]);
-            debug_log(string("Dispatching CONV job ") + num_to_string(job_id) +
-                      " to PE " + num_to_string(workers[i]) + ".");
             send_packet(packet);
         }
 
@@ -1403,59 +1541,60 @@ SC_MODULE(Controller)
         int received_count = 0;
         while (received_count < (int)workers.size())
         {
-            set_wait_context(string("CONV layer ") + num_to_string(layer) +
+            set_wait_context(string("SRAM CONV layer ") +
+                             num_to_string(layer) +
                              " result, missing PEs [" +
                              missing_workers_string(workers, received) + "]");
             Packet result = receive_compute_result();
-            debug_log(string("Received CONV result from PE ") + num_to_string(result.source_id) + ".");
             int index = worker_index(workers, result.source_id);
-            if (index < 0)
-            {
-                debug_log(string("Deadlock watchdog: unexpected CONV result source PE ") +
-                          num_to_string(result.source_id) + ".");
+            if (index < 0 || received[index])
                 continue;
-            }
-            if (received[index])
-            {
-                debug_log(string("Deadlock watchdog: duplicate CONV result from PE ") +
-                          num_to_string(result.source_id) + ".");
-                continue;
-            }
             received[index] = true;
             received_count++;
-            merge_channel_result(output, result);
+            merge_channel_result_to_sram(output_base, result);
         }
 
-        debug_log(string("Finished CONV layer ") + num_to_string(layer) + ".");
-        return output;
+        debug_log(string("Finished SRAM-resident CONV layer ") +
+                  num_to_string(layer) + ".");
     }
 
-    // Run one max-pooling layer through worker PEs.
-    // Pooling has no weight/bias, so only input is preloaded.
-    vector<float> run_pool_on_pes(const vector<float> &feature,
-                                  int in_h, int in_w, int ch,
-                                  int kernel, int stride)
+    void run_pool_on_pes_sram(unsigned int input_base,
+                              unsigned int output_base,
+                              int in_h, int in_w, int ch,
+                              int kernel, int stride)
     {
-        debug_log("Starting POOL layer.");
+        debug_log("Starting SRAM-resident POOL layer.");
         int out_h = (in_h - kernel) / stride + 1;
         int out_w = (in_w - kernel) / stride + 1;
-        vector<float> output(out_h * out_w * ch, 0.0f);
+        unsigned int input_words = (unsigned int)(in_h * in_w * ch);
+        unsigned int output_words = (unsigned int)(out_h * out_w * ch);
+
+        if (!global_sram.can_hold(input_base, input_words) ||
+            !global_sram.can_hold(output_base, output_words))
+        {
+            cout << "[ERROR] POOL SRAM activation range overflow." << endl;
+            sc_stop();
+            return;
+        }
+
+        debug_log(string("Streaming POOL input from SRAM to worker PEs, values=") +
+                  num_to_string(input_words) + ".");
+        send_load_packet_from_sram(BROADCAST_WORKERS,
+                                   OP_LOAD_INPUT,
+                                   0,
+                                   input_base,
+                                   input_words);
+        wait_for_load_acks(WORKER_COUNT, "SRAM pool input broadcast");
 
         vector<int> workers;
         vector<int> starts;
         vector<int> counts;
-
-        broadcast_input_to_workers(0, feature);
 
         int base = 0;
         for (int worker = FIRST_WORKER; worker <= LAST_WORKER && base < ch; worker++)
         {
             int remaining_workers = LAST_WORKER - worker + 1;
             int c_count = (ch - base + remaining_workers - 1) / remaining_workers;
-
-            debug_log(string("Preparing POOL worker PE ") + num_to_string(worker) +
-                      ", channels [" + num_to_string(base) + ", " +
-                      num_to_string(base + c_count - 1) + "].");
             workers.push_back(worker);
             starts.push_back(base);
             counts.push_back(c_count);
@@ -1465,10 +1604,10 @@ SC_MODULE(Controller)
         for (size_t i = 0; i < workers.size(); i++)
         {
             int job_id = next_job_id++;
-            Packet packet = make_pool_compute(workers[i], job_id, in_h, in_w, ch,
-                                              kernel, stride, starts[i], counts[i]);
-            debug_log(string("Dispatching POOL job ") + num_to_string(job_id) +
-                      " to PE " + num_to_string(workers[i]) + ".");
+            Packet packet = make_pool_compute(workers[i], job_id,
+                                              in_h, in_w, ch,
+                                              kernel, stride,
+                                              starts[i], counts[i]);
             send_packet(packet);
         }
 
@@ -1476,30 +1615,18 @@ SC_MODULE(Controller)
         int received_count = 0;
         while (received_count < (int)workers.size())
         {
-            set_wait_context(string("POOL result, missing PEs [") +
+            set_wait_context(string("SRAM POOL result, missing PEs [") +
                              missing_workers_string(workers, received) + "]");
             Packet result = receive_compute_result();
-            debug_log(string("Received POOL result from PE ") + num_to_string(result.source_id) + ".");
             int index = worker_index(workers, result.source_id);
-            if (index < 0)
-            {
-                debug_log(string("Deadlock watchdog: unexpected POOL result source PE ") +
-                          num_to_string(result.source_id) + ".");
+            if (index < 0 || received[index])
                 continue;
-            }
-            if (received[index])
-            {
-                debug_log(string("Deadlock watchdog: duplicate POOL result from PE ") +
-                          num_to_string(result.source_id) + ".");
-                continue;
-            }
             received[index] = true;
             received_count++;
-            merge_channel_result(output, result);
+            merge_channel_result_to_sram(output_base, result);
         }
 
-        debug_log("Finished POOL layer.");
-        return output;
+        debug_log("Finished SRAM-resident POOL layer.");
     }
 
     void prefetch_fc_weight_tile_now(int layer,
@@ -1880,29 +2007,6 @@ SC_MODULE(Controller)
         debug_log(string("Finished PE-based systolic FC layer ") + num_to_string(layer) + ".");
     }
 
-    // Compatibility helper for experiments. The top-level optimized schedule
-    // uses run_fc_on_pes_sram() so FC layer outputs stay in Global SRAM instead
-    // of returning as large Controller buffers.
-    vector<float> run_fc_on_pes(const vector<float> &feature,
-                                int layer, int out_size, bool apply_relu)
-    {
-        sram_write_only(SRAM_FC_INPUT_BASE, feature,
-                        string("FC layer ") + num_to_string(layer) +
-                            " input activation");
-        run_fc_on_pes_sram(SRAM_FC_INPUT_BASE,
-                           (int)feature.size(),
-                           SRAM_FC_OUTPUT_BASE,
-                           layer,
-                           out_size,
-                           apply_relu);
-        vector<float> output =
-            sram_read_only(SRAM_FC_OUTPUT_BASE,
-                           (unsigned int)out_size,
-                           string("FC layer ") + num_to_string(layer) +
-                               " output activation");
-        return output;
-    }
-
     // Final softmax is kept in Controller because it is a small output-format
     // step after all PE-computed fc8 scores have been collected.
     vector<double> softmax(const vector<float> &input)
@@ -2125,45 +2229,78 @@ SC_MODULE(Controller)
             return;
         }
 
-        // Input image -> zero padding.
-        vector<float> feature = read_dram_tensor(0, false, IMG_H * IMG_W * IMG_C);
-        feature = zero_pad_224_to_227(feature);
-        debug_log("Finished input zero padding.");
+        // Input image -> SRAM zero padding.
+        dma_read_to_sram(DRAM_INPUT_BASE,
+                         SRAM_CONV_BUF_A_BASE,
+                         IMG_H * IMG_W * IMG_C,
+                         "input image");
+        pad_tensor_sram_to_shape(SRAM_CONV_BUF_A_BASE,
+                                 SRAM_CONV_BUF_B_BASE,
+                                 IMG_H, IMG_W, IMG_C,
+                                 ZP_H, ZP_W,
+                                 2, 2,
+                                 "input image 224x224x3 to 227x227x3");
+        debug_log("Finished SRAM input zero padding.");
 
         // conv1 -> ReLU in PE -> pool1 in PE.
         debug_log("Entering conv1/pool1 block.");
-        feature = run_conv_on_pes(feature, 1, 227, 227, 3, 64, 11, 4);
-        feature = run_pool_on_pes(feature, 55, 55, 64, 3, 2);
+        run_conv_on_pes_sram(SRAM_CONV_BUF_B_BASE,
+                             SRAM_CONV_BUF_A_BASE,
+                             1, 227, 227, 3, 64, 11, 4);
+        run_pool_on_pes_sram(SRAM_CONV_BUF_A_BASE,
+                             SRAM_CONV_BUF_B_BASE,
+                             55, 55, 64, 3, 2);
 
-        // conv2 block: padding in Controller, conv/ReLU/pool in PEs.
+        // conv2 block: SRAM padding, conv/ReLU/pool in PEs.
         debug_log("Entering conv2/pool2 block.");
-        feature = pad_layer(feature, 27, 27, 64, 2);
-        feature = run_conv_on_pes(feature, 2, 31, 31, 64, 192, 5, 1);
-        feature = run_pool_on_pes(feature, 27, 27, 192, 3, 2);
+        pad_tensor_sram(SRAM_CONV_BUF_B_BASE,
+                        SRAM_CONV_BUF_A_BASE,
+                        27, 27, 64, 2,
+                        "pool1 output to conv2 input");
+        run_conv_on_pes_sram(SRAM_CONV_BUF_A_BASE,
+                             SRAM_CONV_BUF_B_BASE,
+                             2, 31, 31, 64, 192, 5, 1);
+        run_pool_on_pes_sram(SRAM_CONV_BUF_B_BASE,
+                             SRAM_CONV_BUF_A_BASE,
+                             27, 27, 192, 3, 2);
 
         // conv3 block.
         debug_log("Entering conv3 block.");
-        feature = pad_layer(feature, 13, 13, 192, 1);
-        feature = run_conv_on_pes(feature, 3, 15, 15, 192, 384, 3, 1);
+        pad_tensor_sram(SRAM_CONV_BUF_A_BASE,
+                        SRAM_CONV_BUF_B_BASE,
+                        13, 13, 192, 1,
+                        "pool2 output to conv3 input");
+        run_conv_on_pes_sram(SRAM_CONV_BUF_B_BASE,
+                             SRAM_CONV_BUF_A_BASE,
+                             3, 15, 15, 192, 384, 3, 1);
 
         // conv4 block.
         debug_log("Entering conv4 block.");
-        feature = pad_layer(feature, 13, 13, 384, 1);
-        feature = run_conv_on_pes(feature, 4, 15, 15, 384, 256, 3, 1);
+        pad_tensor_sram(SRAM_CONV_BUF_A_BASE,
+                        SRAM_CONV_BUF_B_BASE,
+                        13, 13, 384, 1,
+                        "conv3 output to conv4 input");
+        run_conv_on_pes_sram(SRAM_CONV_BUF_B_BASE,
+                             SRAM_CONV_BUF_A_BASE,
+                             4, 15, 15, 384, 256, 3, 1);
 
         // conv5 block and final convolutional pooling.
         debug_log("Entering conv5/pool5 block.");
-        feature = pad_layer(feature, 13, 13, 256, 1);
-        feature = run_conv_on_pes(feature, 5, 15, 15, 256, 256, 3, 1);
-        feature = run_pool_on_pes(feature, 13, 13, 256, 3, 2);
+        pad_tensor_sram(SRAM_CONV_BUF_A_BASE,
+                        SRAM_CONV_BUF_B_BASE,
+                        13, 13, 256, 1,
+                        "conv4 output to conv5 input");
+        run_conv_on_pes_sram(SRAM_CONV_BUF_B_BASE,
+                             SRAM_CONV_BUF_A_BASE,
+                             5, 15, 15, 256, 256, 3, 1);
+        run_pool_on_pes_sram(SRAM_CONV_BUF_A_BASE,
+                             SRAM_CONV_BUF_B_BASE,
+                             13, 13, 256, 3, 2);
 
         // Fully connected classifier.
         debug_log("Entering fully connected classifier.");
-        sram_write_only(SRAM_FC_INPUT_BASE,
-                        feature,
-                        "FC layer 6 input activation");
-        run_fc_on_pes_sram(SRAM_FC_INPUT_BASE,
-                           (int)feature.size(),
+        run_fc_on_pes_sram(SRAM_CONV_BUF_B_BASE,
+                           9216,
                            SRAM_FC_OUTPUT_BASE,
                            6,
                            4096,
