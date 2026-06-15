@@ -34,7 +34,7 @@ enum PeOp
 
 SC_MODULE(PE)
 {
-    static const int MACS_PER_CYCLE = 1024;
+    static const int MACS_PER_CYCLE = 16;
 
     // PE id matches the local router/core id in the 4x4 mesh.
     int id;
