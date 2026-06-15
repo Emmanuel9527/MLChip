@@ -91,6 +91,9 @@ SC_MODULE(Controller)
     unsigned long long optimized_dram_write_words;
     unsigned long long optimized_sram_wait_cycles;
     unsigned long long optimized_noc_payload_words;
+    unsigned long long optimized_noc_packets;
+    unsigned long long optimized_noc_tx_flits;
+    unsigned long long optimized_noc_tx_cycles;
     unsigned long long optimized_systolic_wait_cycles;
     unsigned long long optimized_systolic_mac_ops;
     unsigned long long optimized_systolic_tiles;
@@ -673,16 +676,19 @@ SC_MODULE(Controller)
     // Send one flit into router[0] using valid-ready handshake.
     void send_flit(const Flit &flit)
     {
+        optimized_noc_tx_flits++;
         while (true)
         {
             flit_tx.write(flit);
             req_tx.write(true);
             wait();
+            optimized_noc_tx_cycles++;
 
             if (ack_tx.read())
             {
                 req_tx.write(false);
                 wait();
+                optimized_noc_tx_cycles++;
                 return;
             }
         }
@@ -691,6 +697,7 @@ SC_MODULE(Controller)
     // Serialize a packet into one HEAD flit and payload BODY/TAIL flits.
     void send_packet(const Packet &packet)
     {
+        optimized_noc_packets++;
         optimized_noc_payload_words += packet.datas.size();
         int payload_flits =
             (packet.datas.size() + PACKED_FLIT_WORDS - 1) / PACKED_FLIT_WORDS;
@@ -1979,10 +1986,60 @@ SC_MODULE(Controller)
 
     void print_optimized_metrics()
     {
+        unsigned long long dram_read_bytes = optimized_dram_read_words * 4ull;
+        unsigned long long dram_write_bytes = optimized_dram_write_words * 4ull;
+        unsigned long long sram_read_bytes = global_sram.read_words * 4ull;
+        unsigned long long sram_write_bytes = global_sram.write_words * 4ull;
+        unsigned long long total_memory_bytes =
+            dram_read_bytes + dram_write_bytes +
+            sram_read_bytes + sram_write_bytes;
+        double avg_noc_injection_latency =
+            (optimized_noc_tx_flits == 0)
+                ? 0.0
+                : (double)optimized_noc_tx_cycles /
+                      (double)optimized_noc_tx_flits;
         cout << "========== Optimized Design Metrics ==========" << endl;
+        cout << "Number of PEs: " << WORKER_COUNT << endl;
+        cout << "MAC units per PE: " << PE_MACS_PER_CYCLE << endl;
+        cout << "Total MAC units: "
+             << (WORKER_COUNT * PE_MACS_PER_CYCLE) << endl;
+        cout << "Local SRAM per PE bytes: 65536" << endl;
+        cout << "Total PE local SRAM bytes: "
+             << (WORKER_COUNT * 65536ull) << endl;
+        cout << "Global SRAM bytes: "
+             << (SRAM_CAPACITY_WORDS * 4ull) << endl;
+        cout << "Total on-chip SRAM bytes: "
+             << (SRAM_CAPACITY_WORDS * 4ull +
+                 WORKER_COUNT * 65536ull) << endl;
+        cout << "SRAM bit width: 32" << endl;
+        cout << "Global SRAM banks: " << global_sram.bank_count << endl;
+        cout << "PE local SRAM input banks per PE: 64" << endl;
+        cout << "PE local SRAM weight banks per PE: 64" << endl;
         cout << "DRAM read words: " << optimized_dram_read_words << endl;
         cout << "DRAM write words: " << optimized_dram_write_words << endl;
+        cout << "DRAM read bytes: " << dram_read_bytes << endl;
+        cout << "DRAM write bytes: " << dram_write_bytes << endl;
+        cout << "DRAM read GB: " << ((double)dram_read_bytes / 1.0e9) << endl;
+        cout << "DRAM write GB: " << ((double)dram_write_bytes / 1.0e9) << endl;
+        cout << "SRAM read bytes: " << sram_read_bytes << endl;
+        cout << "SRAM write bytes: " << sram_write_bytes << endl;
+        cout << "SRAM read GB: " << ((double)sram_read_bytes / 1.0e9) << endl;
+        cout << "SRAM write GB: " << ((double)sram_write_bytes / 1.0e9) << endl;
+        cout << "Total memory access GB: "
+             << ((double)total_memory_bytes / 1.0e9) << endl;
         cout << "NoC payload words: " << optimized_noc_payload_words << endl;
+        cout << "NoC packets injected by Controller: "
+             << optimized_noc_packets << endl;
+        cout << "NoC flits injected by Controller: "
+             << optimized_noc_tx_flits << endl;
+        cout << "NoC injection cycles: "
+             << optimized_noc_tx_cycles << endl;
+        cout << "Average NoC injection latency cycles/flit: "
+             << avg_noc_injection_latency << endl;
+        cout << "NoC routing method: deterministic mesh routing with HOST controller port" << endl;
+        cout << "Multicast support: row-wise systolic input broadcast" << endl;
+        cout << "NoC protocol: custom valid/ack packet NoC" << endl;
+        cout << "AXI protocol: AXI4-like DMA memory interface" << endl;
         cout << "Modeled SRAM wait cycles: " << optimized_sram_wait_cycles << endl;
         cout << "Modeled systolic wait cycles: " << optimized_systolic_wait_cycles << endl;
         cout << "Systolic MAC ops: " << optimized_systolic_mac_ops << endl;
@@ -1997,6 +2054,9 @@ SC_MODULE(Controller)
                                  : (double)optimized_systolic_mac_ops * 100.0 /
                                        (double)max_macs;
         cout << "Estimated systolic utilization (%): " << utilization << endl;
+        cout << "Dataflow design: SRAM-resident FC with two 2x4 systolic MVM sub-arrays" << endl;
+        cout << "Overlap: FC weight DMA-to-SRAM prefetch overlaps current tile compute through ping-pong buffers" << endl;
+        cout << "SystemC timestamp: " << sc_time_stamp() << endl;
         cout << "FC optimization: original PE0..PE15 form a 4x4 systolic-style array with SRAM input, weight, bias, psum, and output buffers" << endl;
         cout << "==============================================" << endl;
         global_sram.print_metrics("Global Scratchpad");
@@ -2034,6 +2094,9 @@ SC_MODULE(Controller)
         optimized_dram_write_words = 0;
         optimized_sram_wait_cycles = 0;
         optimized_noc_payload_words = 0;
+        optimized_noc_packets = 0;
+        optimized_noc_tx_flits = 0;
+        optimized_noc_tx_cycles = 0;
         optimized_systolic_wait_cycles = 0;
         optimized_systolic_mac_ops = 0;
         optimized_systolic_tiles = 0;
@@ -2150,6 +2213,16 @@ SC_MODULE(Controller)
         dma_service_request = false;
         dma_service_busy = false;
         dma_service_mode = DMA_SERVICE_READ_VECTOR;
+        optimized_dram_read_words = 0;
+        optimized_dram_write_words = 0;
+        optimized_sram_wait_cycles = 0;
+        optimized_noc_payload_words = 0;
+        optimized_noc_packets = 0;
+        optimized_noc_tx_flits = 0;
+        optimized_noc_tx_cycles = 0;
+        optimized_systolic_wait_cycles = 0;
+        optimized_systolic_mac_ops = 0;
+        optimized_systolic_tiles = 0;
         SC_THREAD(run);
         sensitive << clk.pos();
         SC_THREAD(dma_service_thread);

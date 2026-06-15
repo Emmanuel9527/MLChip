@@ -25,6 +25,9 @@ a.out
 *.tar.gz
 *.zip
 
+# Local report drafts
+Final_project/final_report_template.tex
+
 # Temporary files
 *~
 .DS_Store

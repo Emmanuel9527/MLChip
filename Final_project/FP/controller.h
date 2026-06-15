@@ -74,11 +74,18 @@ SC_MODULE(Controller)
     static const int UNEXPECTED_FLIT_LOG_INTERVAL = 1000;
     static const int DMA_PROGRESS_INTERVAL = 1000000;
     static const int PACKET_PROGRESS_FLITS = 50000;
+    static const int BASELINE_PE_MACS_PER_CYCLE = 64;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
     vector<Packet> pending_packets;
     string wait_context;
+    unsigned long long baseline_dram_read_words;
+    unsigned long long baseline_dram_write_words;
+    unsigned long long baseline_noc_payload_words;
+    unsigned long long baseline_noc_packets;
+    unsigned long long baseline_noc_tx_flits;
+    unsigned long long baseline_noc_tx_cycles;
 
     void debug_log(const string &msg)
     {
@@ -131,6 +138,7 @@ SC_MODULE(Controller)
     {
         vector<float> values;
         values.reserve(expected);
+        baseline_dram_read_words += expected;
         debug_log(string("DMA read request: ") + name + ", words=" + num_to_string(expected) + ".");
         start_dma_command(false, addr, (unsigned int)expected);
 
@@ -161,6 +169,7 @@ SC_MODULE(Controller)
 
     void dma_write_vector(unsigned int addr, const vector<float> &values, const string &name)
     {
+        baseline_dram_write_words += values.size();
         debug_log(string("DMA write request: ") + name + ", words=" +
                   num_to_string(values.size()) + ".");
         start_dma_command(true, addr, (unsigned int)values.size());
@@ -194,16 +203,19 @@ SC_MODULE(Controller)
     // Send one flit into router[0] using valid-ready handshake.
     void send_flit(const Flit &flit)
     {
+        baseline_noc_tx_flits++;
         while (true)
         {
             flit_tx.write(flit);
             req_tx.write(true);
             wait();
+            baseline_noc_tx_cycles++;
 
             if (ack_tx.read())
             {
                 req_tx.write(false);
                 wait();
+                baseline_noc_tx_cycles++;
                 return;
             }
         }
@@ -212,6 +224,8 @@ SC_MODULE(Controller)
     // Serialize a packet into one HEAD flit and payload BODY/TAIL flits.
     void send_packet(const Packet &packet)
     {
+        baseline_noc_packets++;
+        baseline_noc_payload_words += packet.datas.size();
         int payload_flits =
             (packet.datas.size() + PACKED_FLIT_WORDS - 1) / PACKED_FLIT_WORDS;
         bool report_progress = false;
@@ -1037,6 +1051,55 @@ SC_MODULE(Controller)
         cout << "=================================================" << endl;
     }
 
+    void print_baseline_metrics()
+    {
+        unsigned long long dram_read_bytes = baseline_dram_read_words * 4ull;
+        unsigned long long dram_write_bytes = baseline_dram_write_words * 4ull;
+        unsigned long long dram_total_bytes = dram_read_bytes + dram_write_bytes;
+        double avg_noc_injection_latency =
+            (baseline_noc_tx_flits == 0)
+                ? 0.0
+                : (double)baseline_noc_tx_cycles /
+                      (double)baseline_noc_tx_flits;
+
+        cout << "========== Baseline Design Metrics ==========" << endl;
+        cout << "Number of PEs: " << WORKER_COUNT << endl;
+        cout << "MAC units per PE: " << BASELINE_PE_MACS_PER_CYCLE << endl;
+        cout << "Total MAC units: "
+             << (WORKER_COUNT * BASELINE_PE_MACS_PER_CYCLE) << endl;
+        cout << "Local SRAM per PE bytes: 0" << endl;
+        cout << "Total on-chip SRAM bytes: 0" << endl;
+        cout << "SRAM bit width: N/A" << endl;
+        cout << "SRAM banks: 0" << endl;
+        cout << "DRAM read words: " << baseline_dram_read_words << endl;
+        cout << "DRAM write words: " << baseline_dram_write_words << endl;
+        cout << "DRAM read bytes: " << dram_read_bytes << endl;
+        cout << "DRAM write bytes: " << dram_write_bytes << endl;
+        cout << "DRAM total bytes: " << dram_total_bytes << endl;
+        cout << "DRAM read GB: " << ((double)dram_read_bytes / 1.0e9) << endl;
+        cout << "DRAM write GB: " << ((double)dram_write_bytes / 1.0e9) << endl;
+        cout << "SRAM read bytes: 0" << endl;
+        cout << "SRAM write bytes: 0" << endl;
+        cout << "Total memory access GB: "
+             << ((double)dram_total_bytes / 1.0e9) << endl;
+        cout << "NoC payload words: " << baseline_noc_payload_words << endl;
+        cout << "NoC packets injected by Controller: "
+             << baseline_noc_packets << endl;
+        cout << "NoC flits injected by Controller: "
+             << baseline_noc_tx_flits << endl;
+        cout << "NoC injection cycles: "
+             << baseline_noc_tx_cycles << endl;
+        cout << "Average NoC injection latency cycles/flit: "
+             << avg_noc_injection_latency << endl;
+        cout << "NoC routing method: deterministic mesh routing" << endl;
+        cout << "Multicast support: broadcast packet for shared input payloads" << endl;
+        cout << "NoC protocol: custom valid/ack packet NoC" << endl;
+        cout << "AXI protocol: AXI4-like DMA memory interface" << endl;
+        cout << "Dataflow design: HW4-style Controller-staged PE dispatch" << endl;
+        cout << "SystemC timestamp: " << sc_time_stamp() << endl;
+        cout << "=============================================" << endl;
+    }
+
     void run_output_writeback_test()
     {
         cout << "[TEST] Running output write-back DMA test." << endl;
@@ -1135,12 +1198,19 @@ SC_MODULE(Controller)
         debug_log("Computing softmax and printing Top-100 output.");
         vector<double> prob = softmax(dram_output);
         print_top100(dram_output, prob);
+        print_baseline_metrics();
         sc_stop();
     }
 
     // Register the Controller as one clocked SystemC thread.
     SC_CTOR(Controller)
     {
+        baseline_dram_read_words = 0;
+        baseline_dram_write_words = 0;
+        baseline_noc_payload_words = 0;
+        baseline_noc_packets = 0;
+        baseline_noc_tx_flits = 0;
+        baseline_noc_tx_cycles = 0;
         SC_THREAD(run);
         sensitive << clk.pos();
     }
