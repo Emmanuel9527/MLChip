@@ -27,6 +27,7 @@ a.out
 
 # Local report drafts
 Final_project/final_report_template.tex
+*.png
 
 # Temporary files
 *~
