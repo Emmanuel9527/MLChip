@@ -54,14 +54,56 @@ SC_MODULE(PE)
         return value;
     }
 
+    static unsigned long long &metric_fc_mac_ops()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
+    static unsigned long long &metric_fc_compute_cycles()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
+    static unsigned long long &metric_fc_compute_jobs()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
+    static unsigned long long &metric_peak_input_words()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
+    static unsigned long long &metric_peak_weight_words()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
+    static unsigned long long &metric_peak_bias_words()
+    {
+        static unsigned long long value = 0;
+        return value;
+    }
+
     static void reset_metrics()
     {
         metric_mac_ops() = 0;
         metric_compute_cycles() = 0;
         metric_compute_jobs() = 0;
+        metric_fc_mac_ops() = 0;
+        metric_fc_compute_cycles() = 0;
+        metric_fc_compute_jobs() = 0;
+        metric_peak_input_words() = 0;
+        metric_peak_weight_words() = 0;
+        metric_peak_bias_words() = 0;
     }
 
-    static void record_macs(long long mac_count)
+    static void record_macs(long long mac_count, bool is_fc)
     {
         unsigned long long cycles =
             (unsigned long long)((mac_count + MACS_PER_CYCLE - 1) /
@@ -69,6 +111,12 @@ SC_MODULE(PE)
         metric_mac_ops() += (unsigned long long)mac_count;
         metric_compute_cycles() += cycles;
         metric_compute_jobs()++;
+        if (is_fc)
+        {
+            metric_fc_mac_ops() += (unsigned long long)mac_count;
+            metric_fc_compute_cycles() += cycles;
+            metric_fc_compute_jobs()++;
+        }
     }
 
     static unsigned long long total_mac_ops()
@@ -86,6 +134,36 @@ SC_MODULE(PE)
         return metric_compute_jobs();
     }
 
+    static unsigned long long total_fc_mac_ops()
+    {
+        return metric_fc_mac_ops();
+    }
+
+    static unsigned long long total_fc_compute_cycles()
+    {
+        return metric_fc_compute_cycles();
+    }
+
+    static unsigned long long total_fc_compute_jobs()
+    {
+        return metric_fc_compute_jobs();
+    }
+
+    static unsigned long long peak_input_words()
+    {
+        return metric_peak_input_words();
+    }
+
+    static unsigned long long peak_weight_words()
+    {
+        return metric_peak_weight_words();
+    }
+
+    static unsigned long long peak_bias_words()
+    {
+        return metric_peak_bias_words();
+    }
+
     // PE id matches the local router/core id in the 4x4 mesh.
     int id;
 
@@ -101,10 +179,10 @@ SC_MODULE(PE)
         return c * height * width + h * width + w;
     }
 
-    void wait_for_macs(long long mac_count)
+    void wait_for_macs(long long mac_count, bool is_fc = false)
     {
         long long cycles = (mac_count + MACS_PER_CYCLE - 1) / MACS_PER_CYCLE;
-        record_macs(mac_count);
+        record_macs(mac_count, is_fc);
         for (long long i = 0; i < cycles; i++)
             wait();
     }
@@ -127,16 +205,25 @@ SC_MODULE(PE)
         if (op == OP_LOAD_INPUT)
         {
             load_buffer(input_buf, job);
+            metric_peak_input_words() =
+                max(metric_peak_input_words(),
+                    (unsigned long long)input_buf.size());
             return make_load_ack(job);
         }
         if (op == OP_LOAD_WEIGHT)
         {
             load_buffer(weight_buf, job);
+            metric_peak_weight_words() =
+                max(metric_peak_weight_words(),
+                    (unsigned long long)weight_buf.size());
             return make_load_ack(job);
         }
         if (op == OP_LOAD_BIAS)
         {
             load_buffer(bias_buf, job);
+            metric_peak_bias_words() =
+                max(metric_peak_bias_words(),
+                    (unsigned long long)bias_buf.size());
             return make_load_ack(job);
         }
         if (op == OP_COMPUTE_CONV)
@@ -337,7 +424,7 @@ SC_MODULE(PE)
              << ((mac_count + MACS_PER_CYCLE - 1) / MACS_PER_CYCLE)
              << " for macs=" << mac_count << "." << endl;
 #endif
-        wait_for_macs(mac_count);
+        wait_for_macs(mac_count, true);
 
         Packet *result = make_result(job, job_id);
         result->datas.push_back((float)o_start);

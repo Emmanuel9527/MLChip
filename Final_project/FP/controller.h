@@ -1084,12 +1084,36 @@ SC_MODULE(Controller)
         unsigned long long pe_compute_capacity =
             pe_compute_cycles *
             (unsigned long long)BASELINE_PE_MACS_PER_CYCLE;
+        unsigned long long pe_fc_mac_ops = PE::total_fc_mac_ops();
+        unsigned long long pe_fc_compute_cycles = PE::total_fc_compute_cycles();
+        unsigned long long pe_fc_compute_jobs = PE::total_fc_compute_jobs();
+        unsigned long long pe_fc_compute_capacity =
+            pe_fc_compute_cycles *
+            (unsigned long long)BASELINE_PE_MACS_PER_CYCLE;
+        unsigned long long peak_pe_input_words = PE::peak_input_words();
+        unsigned long long peak_pe_weight_words = PE::peak_weight_words();
+        unsigned long long peak_pe_bias_words = PE::peak_bias_words();
+        unsigned long long peak_pe_local_words =
+            peak_pe_input_words + peak_pe_weight_words + peak_pe_bias_words;
+        unsigned long long pe_system_capacity =
+            execution_cycles *
+            (unsigned long long)WORKER_COUNT *
+            (unsigned long long)BASELINE_PE_MACS_PER_CYCLE;
         double pe_compute_utilization =
             (pe_compute_capacity == 0)
                 ? 0.0
                 : (double)pe_mac_ops * 100.0 /
                       (double)pe_compute_capacity;
-
+        double pe_fc_compute_utilization =
+            (pe_fc_compute_capacity == 0)
+                ? 0.0
+                : (double)pe_fc_mac_ops * 100.0 /
+                      (double)pe_fc_compute_capacity;
+        double pe_system_utilization =
+            (pe_system_capacity == 0)
+                ? 0.0
+                : (double)pe_mac_ops * 100.0 /
+                      (double)pe_system_capacity;
         cout << "========== Baseline Design Metrics ==========" << endl;
         cout << "Number of PEs: " << WORKER_COUNT << endl;
         cout << "MAC units per PE: " << BASELINE_PE_MACS_PER_CYCLE << endl;
@@ -1102,6 +1126,25 @@ SC_MODULE(Controller)
              << pe_compute_cycles << endl;
         cout << "Estimated baseline PE compute utilization (%): "
              << pe_compute_utilization << endl;
+        cout << "Baseline FC PE compute jobs: "
+             << pe_fc_compute_jobs << endl;
+        cout << "Baseline FC PE MAC ops: " << pe_fc_mac_ops << endl;
+        cout << "Baseline FC PE active compute cycles: "
+             << pe_fc_compute_cycles << endl;
+        cout << "Estimated baseline FC PE compute utilization (%): "
+             << pe_fc_compute_utilization << endl;
+        cout << "Estimated baseline system-level PE utilization (%): "
+             << pe_system_utilization << endl;
+        cout << "Baseline system-level PE capacity MACs: "
+             << pe_system_capacity << endl;
+        cout << "Baseline PE behavioral local input buffer peak words: "
+             << peak_pe_input_words << endl;
+        cout << "Baseline PE behavioral local weight buffer peak words: "
+             << peak_pe_weight_words << endl;
+        cout << "Baseline PE behavioral local bias buffer peak words: "
+             << peak_pe_bias_words << endl;
+        cout << "Baseline PE behavioral local buffer peak bytes per PE: "
+             << (peak_pe_local_words * 4ull) << endl;
         cout << "Local SRAM per PE bytes: 0" << endl;
         cout << "Total on-chip SRAM bytes: 0" << endl;
         cout << "SRAM bit width: N/A" << endl;
@@ -1147,7 +1190,7 @@ SC_MODULE(Controller)
         cout << "Multicast support: broadcast packet for shared input payloads" << endl;
         cout << "NoC protocol: custom valid/ack packet NoC" << endl;
         cout << "AXI protocol: AXI4-like DMA memory interface" << endl;
-        cout << "Dataflow design: HW4-style Controller-staged PE dispatch" << endl;
+        cout << "Dataflow design: Controller-staged PE dispatch" << endl;
         cout << "Overlap of computation, communication, and memory access: none; "
              << "baseline waits for each DMA/NoC/PE stage before the next stage"
              << endl;
@@ -1156,8 +1199,9 @@ SC_MODULE(Controller)
              << "injection cycles; per-layer breakdown is not separately "
              << "instrumented" << endl;
         cout << "Other design-specific metrics: functional single-bank DRAM, "
-             << "no explicit SRAM hierarchy, 32-bit AXI data words carrying "
-             << "IEEE-754 float bits" << endl;
+             << "no explicit SRAM hierarchy, controller-side behavioral "
+             << "feature buffer, 32-bit AXI data words carrying IEEE-754 "
+             << "float bits" << endl;
         cout << "=============================================" << endl;
     }
 
