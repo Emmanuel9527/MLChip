@@ -1,0 +1,247 @@
+           Machine Learning Intelligent Chip Design
+
+                                      Final Project
+          NoC-based CNN Accelerator System with AXI4 DMA
+                 Architecture & Design Optimization
+
+Description
+In the Final Project, you are required to replace the ROM-based data storage used in HW4 with
+a DRAM-based memory model that supports both read and write operations. The accelerator
+must access data in DRAM through an AXI4-based DMA mechanism. On-chip SRAM or local
+SRAM may be used as optional buffering components.
+In addition, you must propose an optimized design and compare it with the baseline design. The
+optimization is not limited to reducing execution cycles. You should clearly explain your design
+choices, evaluate their trade-offs, and discuss the advantages and disadvantages of your
+optimized design.
+
+
+Implementation Details
+
+
+
+
+Figure 1. Overview of the NoC-based CNN accelerator system with AXI4 DMA.
+
+
+In this project, the input images, weights, bias values, intermediate data, and output results
+should be stored in an external DRAM model instead of the ROM used in HW4. The DRAM
+must support both read and write operations. All data transfers between DRAM and the
+accelerator must be performed through an AXI4-based DMA mechanism. During computation,
+intermediate data that cannot fit in the on-chip SRAM or local SRAM may be written back to
+DRAM and later read again through the DMA.
+You should define the accessible memory regions in DRAM, including the address ranges for
+inputs, weights, bias values, intermediate data, and output results. The detailed memory map
+may be designed by yourself, but it must be clearly described in the report.
+The minimum required system must include a DRAM model, AXI4-based DMA access, a PE
+array with at least 4x4 PEs, a mesh-based NoC, and a controller that coordinates data
+movement and computation. The system must correctly execute the required test cases and
+print the correct classification results.
+Inside the accelerator, you may use on-chip SRAM for data buffering and data reuse. You may
+also add local SRAM inside each PE if needed. However, using SRAM is not mandatory. If
+SRAM is used, it does not need to be implemented at the gate level, but its behavior model
+should be clearly defined, including its read/write behavior, latency, storage capacity, and data
+buffering behavior. The assignment does not impose a fixed upper limit on SRAM capacity or
+MAC resources, but these resources are part of the design trade-off and may affect the
+evaluation of the optimized design.
+Except for replacing the ROM-based data access mechanism and modifying the controller to
+support AXI4 DMA-based memory access, the baseline system should follow the HW4 design.
+You may directly use your submitted HW4 files as the starting point for the Final Project.
+For the optimized version, you may modify any part of the system. However, all off-chip memory
+accesses must still be performed through the AXI4 DMA-based memory access mechanism.
+Please note that the parameter files inside the data folder are the only files that must not be
+modified. The data folder must remain unchanged.
+
+
+Minimum Requirements and Design Rules
+1.   Both the baseline and optimized designs must keep at least a 4x4 mesh-NoC. The
+     optimized design may modify the PE internal architecture, MAC resources, local SRAM,
+     dataflow, routing policy, buffering strategy, and scheduling method, but the physical NoC
+     size must not be smaller than 4x4.
+2.   The DRAM layout may be designed by each student. The memory map must include
+     inputs, weights, bias values, intermediate data, and output results, and must be clearly
+     described in the report.
+3.   The output results must be written back to DRAM before being printed or checked.
+4.   The data folder may only be used to initialize the DRAM model. During CNN execution, the
+     controller, DMA, PE, NoC, and accelerator modules must not directly read image files,
+     weight files, or bias files from the data folder. All accelerator data accesses during
+     computation must go through the DRAM model and the AXI4-based DMA mechanism.
+5.   Both the baseline and optimized designs must print the correct top-100 classification
+     results for make cat and make dog. The top-100 classification results must be exactly
+     correct.
+6.   Both FP/ and FP_Optimized/ must contain a complete and independently compilable
+     SystemC project. The TA will enter each folder and run make cat and make dog.
+
+
+Implement Notes
+You may refer to the provided AXI_introduction.pptx for details about the AXI4 protocol. The
+AXI4-based DMA model must at least support burst transfers, VALID/READY handshake
+behavior, transfer length information such as ARLEN/AWLEN, and transfer size information
+such as ARSIZE/AWSIZE. A simplified AXI4 model is acceptable, but the implemented signals,
+parameters, timing behavior, and abstraction level must be clearly described in the report.
+Supporting outstanding transactions is optional. Designs that implement a more complete AXI4
+behavior, such as five independent AXI channels and outstanding transactions, may receive
+higher scores in the AXI completeness evaluation.
+For the optimization part, you may optimize any part of the system. The optimization does not
+have to focus only on reducing the total number of execution cycles, and the accelerator
+(simulator) does not have to be fully cycle accurate. You may also consider other design
+objectives, such as reducing the number of MAC units, reducing SRAM capacity, reducing
+DRAM or SRAM access volume, improving NoC utilization, improving PE utilization, reducing
+NoC transfer latency, improving data reuse, redesigning the dataflow, supporting multicast,
+overlapping computation and communication, or improving the cycle accuracy of the simulator.
+SRAM capacity and MAC resources are not strictly limited, but using more resources should be
+justified through a clear trade-off analysis.
+Your report must clearly explain the optimization goal, design method, trade-offs, and
+evaluation metrics. For example, an optimized design may use fewer MAC units at the cost of
+longer execution time, reduce DRAM accesses by increasing SRAM capacity, improve NoC
+efficiency through multicast, or improve data reuse through a different dataflow. Your
+implementation must be consistent with the design described in your report. Any form of
+falsification will result in a zero score.
+You do not need to download or extract any additional files. You may directly modify your
+HW4 files to complete the Final Project.
+
+
+Output Result Format
+After running the make cat and make dog commands, your program must print the classification
+results in the same format as the previous assignments. You may also print additional
+information for analyzing your optimized design, such as execution cycles, memory access
+counts, PE utilization, NoC statistics, SRAM usage, or SystemC execution time.
+
+Submission Guidelines & Grading Policy
+⚫ The grading breakdown for this assignment is as follows:
+
+Functionality: 30%
+Functionality: 30%
+Both FP/ and FP_Optimized/ must integrate a DRAM model, AXI4-based DMA access, at least
+a 4x4 PE mesh-NoC, and a controller for data movement and computation. After executing
+make cat and make dog, both versions must display the exactly correct top-100 classification
+results.
+You may also print additional information to help analyze your optimized design, such as
+execution cycles, memory access counts, PE utilization, NoC transfer statistics, SRAM usage,
+or SystemC execution time.
+
+Report & Optimized Design: 70%
+You must propose and implement an optimized design and compare it with the baseline design.
+The optimization may involve trade-offs among computation resources, memory hierarchy, data
+movement, NoC communication, simulation accuracy, and dataflow design. Excessive resource
+usage may affect the trade-off evaluation and the optimized-design score.
+
+The report and optimized method will be evaluated using the following rubric:
+a. AXI completeness: 5%
+    Whether the AXI4-based DMA design properly supports AXI-like behavior, including five
+    independent AXI channels, burst transfer, VALID/READY handshake, transfer length,
+    transfer size, and optional outstanding transactions.
+
+b. SRAM model and usage: 10%
+    Whether the design includes a reasonable SRAM behavior model and uses SRAM
+    effectively for buffering, data reuse, or reducing DRAM access. SRAM is optional for
+    functionality, but it is evaluated as part of the optimized design score. Designs without
+    SRAM may still be functionally correct, but cannot receive full credit in this item.
+c. Trade-off analysis and evaluation table: 10%
+    Whether the report clearly analyzes the trade-offs among execution cycles, memory access
+    volume, SRAM capacity, MAC resources, NoC utilization, PE utilization, and other metrics.
+
+d. Optimization implementation: 15%
+    Whether the optimized design is actually implemented in code and is consistent with the
+    report, rather than only described conceptually.
+
+e. Memory layout design: 5%
+    Whether the DRAM address map and data placement are clearly defined, reasonable, and
+    consistent with the implemented dataflow.
+
+f. Evaluation metrics and baseline-vs-optimized comparison: 5%
+    Whether the baseline and optimized designs are compared using meaningful metrics and
+    tables.
+
+g. Abstraction level and computation modeling: 10%
+    Whether the computation model reasonably reflects hardware behavior. Designs that model
+    MAC resource sharing, scheduling, and data movement more explicitly will receive higher
+    scores than designs that simply unroll all computations using software-like for loops without
+    meaningful hardware abstraction.
+
+h. Report quality: 10%
+    Whether the report is clear, complete, well organized, and consistent with the submitted
+    source code.
+
+
+If the source code is not submitted, the report will receive no credit.
+
+Required Evaluation Table
+You must collect or estimate the selected metrics for both the baseline and optimized designs using a
+consistent measurement method. The comparison between the baseline design and the optimized design
+must be presented in tables. The following table is a suggested template. The metrics listed in the table
+are examples of possible evaluation items; you do not need to implement every technique listed here or
+fill in every row if it is not applicable to your design. If your optimization targets other aspects, you may
+add new rows or create additional tables.
+Metric / Design Aspect                         Baseline Design    Optimized Design   Notes / Trade-off
+
+Number of PEs
+
+Number of MAC units in each PE
+
+Total number of MAC units
+
+PE utilization
+
+Local SRAM in each PE and its capacity
+
+Total on-chip SRAM capacity
+SRAM bit width
+Number of SRAM banks
+DRAM read volume and DRAM write volume (GB)
+DRAM bit width
+Metric / Design Aspect                        Baseline Design   Optimized Design   Notes / Trade-off
+Number of DRAM banks
+SRAM read volume and SRAM write volume (GB)
+
+Total memory access volume (GB)
+
+Execution cycles
+
+SystemC execution time
+
+NoC routing method
+
+Multicast support
+
+NoC protocol (AXI / ABP)
+
+NoC utilization
+
+NoC transfer latency
+
+Dataflow design
+
+Time breakdown of different operations
+
+Overlap of computation, communication, and
+memory access
+
+Other design-specific metrics
+
+Your report should explain why the selected metrics are important and how they reflect the trade-offs of
+your optimization. A design with fewer execution cycles is not always better if it requires significantly
+more MAC units, larger SRAM capacity, wider memory interfaces, more memory banks, higher memory
+access volume, lower PE utilization, or a more complex communication mechanism. Similarly, using
+more SRAM or more MAC units is allowed, but the benefit must be clearly justified in the evaluation table
+and discussion.
+
+
+⚫ For the file submission, you need to upload a zip archive to New E3. The file should be
+  named FP_mlchipXXX.zip, where XXX is your account ID. The zip file must contain two
+  versions of your code and the report. The report file should be named report_mlchipXXX.pdf,
+  where XXX is your account ID. The internal structure of the zip file should follow the format
+  shown in the figure below.
+
+
+
+
+⚫ If the submitted archive violates the naming rules or the required file structure, 10 points will
+  be deducted.
+⚫ The data folder and all of its contents, including input images, weights, and bias files,
+  must not be included in your submission.
+⚫ Make sure your code is well commented and clearly organized.
+⚫ The following rules must be strictly followed. Any violation will result in 0 points.
+  ◼ Plagiarism is forbidden.
+  ◼ Chinese characters are not allowed anywhere in the submitted files, including
+        comments.
+

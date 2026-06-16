@@ -1,0 +1,194 @@
+NoC-based CNN Accelerator with AXI4-like DMA
+   and SRAM-assisted Systolic FC Dataflow
+                                                          Your Name
+                                              Department of Electrical Engineering
+                                                National Tsing Hua University
+                                               Email: your.email@example.com
+
+
+   Abstract—This final project implements a SystemC-based CNN
+accelerator derived from the HW4 NoC baseline. The baseline
+replaces ROM-based tensor access with an AXI4-like DMA
+and DRAM model while preserving the original controller-
+scheduled PE execution style. The optimized design introduces
+explicit global SRAM, PE-local SRAM, DMA-to-SRAM data
+movement, bounded controller registers, and a PE-level systolic
+fully-connected dataflow mapped onto the original 4 × 4 NoC
+mesh. The optimized FC classifier reuses the 16 original PEs as
+two 2 × 4 MVM sub-arrays, overlaps FC weight prefetch with
+computation through ping-pong SRAM buffers, and commits
+final scores back to DRAM before output reporting.
+                                                                   Fig. 1: Optimized NoC-based CNN accelerator architecture
+                      I. I NTRODUCTION                             with AXI4-like DMA, global SRAM, PE-local SRAM, and
+   The original HW4 design used ROM-style tensor loading           PE-level systolic FC dataflow.
+and a behavioral controller dataflow. For the final project,
+the memory system is remodeled as a DRAM accessed
+through an AXI4-like DMA. The design goal is twofold.              the received stream into controller-side behavioral vectors,
+First, the baseline must remain functionally close to HW4          partitions layer work into PE jobs, sends NoC packets to
+while replacing ROM accesses with DMA-backed DRAM                  worker PEs, and collects result packets. PE0 is not used as
+transfers. Second, the optimized version should expose a           a worker in the baseline because router node 0’s local port
+more hardware-meaningful memory hierarchy and improve the          is occupied by the controller. Therefore, the baseline uses 15
+fully-connected (FC) classifier by using SRAM tiling, DMA          worker PEs.
+prefetch, and PE-level systolic execution.
+                                                                   A. Baseline Dataflow
+         II. OVERALL O PTIMIZED A RCHITECTURE                          For DRAM reads, the controller writes a DMA command
+   Fig. 1 shows the optimized accelerator architecture. The        containing the source byte address and transfer length. The
+system contains an external DRAM, an AXI4-like DMA, a              DMA becomes the AXI master, sends AR channel requests to
+lightweight controller, a global SRAM scratchpad, a 4×4 NoC        DRAM, receives R channel data beats, converts each 32-bit
+mesh, and 16 PE workers. Each PE contains a local SRAM             bus word back to a floating-point value, and streams values
+model, a 64-lane MAC array model, and a nonlinear function         to the controller using read_valid/read_ready. For
+block.                                                             DRAM writes, the controller streams values to DMA through
+   The DRAM side is accessed by an AXI4-like interface. The        write_valid/write_ready; the DMA then performs
+implemented signals include AWADDR, AWLEN, AWVALID,                AW, W, and B channel transactions to DRAM.
+AWREADY, WDATA, WLAST, WVALID, WREADY, BRESP,                          After tensors are available in the controller-side behavioral
+BVALID, BREADY, ARADDR, ARLEN, ARVALID, ARREADY,                   buffer, the controller dispatches PE jobs through the NoC. A
+RDATA, RLAST, RVALID, and RREADY. The AXI data bus is              packet contains one header flit followed by packed payload
+modeled as a 32-bit sc_uint<32> word carrying IEEE-754             flits. The packet payload describes the operation type, layer
+single-precision floating-point bit patterns. Optional full AXI4   id, tensor tile, job id, and other operation-specific fields. The
+sideband signals such as ID, cache, protection, QoS, user, and     PE computes the assigned convolution, pooling, or FC job and
+out-of-order response support are omitted because the current      returns a packet to the controller.
+accelerator issues one simplified DMA transaction at a time.           The baseline is intentionally simple. Its controller-side ten-
+                                                                   sor vectors behave like large staging buffers. This is acceptable
+               III. BASELINE A RCHITECTURE                         for the baseline reference because it preserves the HW4 flow,
+  The baseline keeps the HW4-style computation flow. The           but it is not ideal as a hardware optimization. The optimized
+controller reads tensors from DRAM using the DMA, stages           design therefore removes this hidden large buffer from the FC
+path by making FC activations, weights, biases, partial sums,     D. NoC Operation and Controller Dispatch
+and outputs SRAM-resident.                                           The NoC is a custom valid/ack packet network rather
+                                                                  than AXI or APB. Each flit contains a flit type, a desti-
+              IV. O PTIMIZED A RCHITECTURE                        nation/source header field, and packed 32-bit payload lanes.
+                                                                  The controller serializes each packet into one HEAD flit
+A. Controller as a Control Processor                              and multiple BODY/TAIL flits. Routers perform deterministic
+                                                                  mesh routing based on the destination PE id. The receiver
+   In the optimized design, the controller is modeled as a        reconstructs packets and acknowledges each flit using the
+lightweight accelerator control processor rather than as a        valid/ack handshake.
+large tensor memory. Its hardware-meaningful state consists          For convolution and pooling, the controller follows the
+of DMA descriptor/status registers, loop counters, NoC packet     HW4-style dispatch: it partitions the layer output space across
+serialization state, and an 8-word FC tile register file. The     worker PEs, sends jobs, and waits for returned result pack-
+8-word tile register corresponds to the maximum number of         ets. For optimized FC, the dispatch is more structured: the
+output neurons computed by one FC tile. It is used for bias,      controller first stages activations and weights through SRAM,
+partial-sum, output-tile, and result bookkeeping values. Large    then sends input segments and weight segments to the PE
+FC tensors are stored in global SRAM rather than controller       rows/columns participating in the systolic MVM tile.
+vectors.
+                                                                  E. Systolic FC Dataflow
+B. DMA and Global SRAM Data Movement                                 The optimized FC classifier maps matrix-vector multiplica-
+                                                                  tion onto the original 4 × 4 PE mesh. The mesh is treated as
+ The optimized DMA service supports four descriptor               two independent 2 × 4 sub-arrays. Each sub-array computes
+modes:                                                            up to four output neurons, so one FC tile computes up to eight
+  • DRAM to controller stream, retained for the legacy            output neurons.
+    behavioral convolution/pooling front-end.                        For an FC layer with input vector b and weight matrix A,
+  • Controller stream to DRAM, retained for the output            each output is:
+    writeback test.                                                                   ci =
+                                                                                           X
+                                                                                               aij bj + biasi .              (1)
+  • DRAM to global SRAM, used by optimized FC weight
+                                                                                              j
+    and bias staging.
+  • Global SRAM to DRAM, used by final FC8 output                    The input dimension is tiled. For each input tile, the input
+    writeback.                                                    vector segment b(j) is read from global SRAM and broadcast
+                                                                  horizontally across the active PE row. Weight segments a(i, j)
+   During FC execution, the controller programs DMA de-           are prefetched from DRAM to global SRAM using ping-pong
+scriptors but does not move bulk tensor words itself. For a       buffers, then loaded into PE-local SRAM. Partial sums move
+weight tile, the controller sets the DRAM source address, the     vertically from the bottom PE row to the top boundary row
+global SRAM destination address, and the number of words.         inside each 2 × 4 sub-array. The top-boundary PE returns the
+The DMA then reads DRAM through AXI and writes each               updated partial sum to the controller tile register. After the last
+received word into global SRAM. For final output writeback,       input tile, ReLU is applied when required.
+the DMA reads the global SRAM output region and writes
+the scores back to DRAM. The final scores are then read back      F. DMA Prefetch and Compute Overlap
+before softmax and Top-100 printing, ensuring that reported         The optimized FC path uses ping-pong SRAM buffers for
+results come from committed DRAM output.                          FC weight tiles. While the PE array computes input tile k
+                                                                  using one weight buffer, the controller starts a DMA-to-SRAM
+C. Global SRAM and PE-local SRAM                                  prefetch for input tile k + 1 into the other buffer. This prevents
+                                                                  the active compute tile from being overwritten and allows
+   The optimized design uses an 8 MB global SRAM scratch-         memory movement to overlap with systolic computation. The
+pad. FC activations are ping-ponged between two SRAM              controller only synchronizes when the next tile is actually
+regions: one region acts as the input activation buffer and the   needed.
+other as the output activation buffer. FC6 writes to the output
+region, FC7 reads that region and writes back to the input          V. C ORE C ONTRIBUTIONS OF THE O PTIMIZED D ESIGN
+region, and FC8 reads the input region and writes final scores      1) Recovered all 16 PEs by moving the controller to the
+to the output region.                                                  router HOST port instead of occupying PE0’s local port.
+   Each PE also contains a 64 KB local SRAM model. The              2) Added explicit global SRAM and PE-local SRAM so
+PE-local SRAM stores input segments, weight segments, and              FC tensors have clear hardware storage locations.
+small tile data needed by the PE. This gives the PE compute         3) Replaced FC controller-side bulk buffers with SRAM-
+path a clear hardware memory structure instead of relying on           resident activation ping-pong buffers and an 8-word
+unbounded software vectors.                                            bounded controller tile register file.
+  4) Added DMA-to-SRAM and SRAM-to-DMA descriptor
+     modes for FC weight, bias, and final output movement.
+  5) Mapped FC matrix-vector multiplication onto two 2 × 4
+     PE-level systolic sub-arrays.
+  6) Added ping-pong FC weight prefetch to overlap DMA
+     memory movement with systolic PE computation.
+  7) Modeled each PE as a 64-lane MAC array with PE-local
+     SRAM and a nonlinear function block.
+  8) Added end-of-run metrics for DRAM/SRAM traffic,
+     NoC payload, NoC injection latency, modeled SRAM
+     cycles, systolic MAC operations, and estimated PE uti-
+     lization.
+              VI. M EASUREMENT M ETHOD
+  The following commands produce the logs used to fill
+Table I:
+cd Final_project/FP
+make clean
+make trace-cat
+
+cd ../FP_Optimized
+make clean
+make trace-cat
+   At the end of the baseline log, use the section Baseline
+Design Metrics. At the end of the optimized log, use
+the section Optimized Design Metrics and Global
+Scratchpad SRAM Metrics. The reported byte counts
+can be converted to GB by dividing by 109 .
+TABLE I: Comparison between baseline and optimized designs. Runtime-dependent values are printed at the end of make
+trace-cat or make trace-dog.
+
+ Metric / Design Aspect                   Baseline Design                              Optimized Design                                 Notes / Log Field
+
+ Number of PEs                            15 worker PEs                                16 worker PEs                                    Number of PEs
+ Number of MAC units in each PE           64                                           64                                               MAC units per PE
+ Total number of MAC units                960                                          1024                                             Total MAC units
+ PE utilization                           Not explicitly optimized                     Fill from log: Estimated systolic                Optimized utilization is estimated from FC systolic
+                                                                                       utilization (%)                                  MAC ops and modeled cycles.
+ Local SRAM in each PE and capacity       0 explicit PE-local SRAM                     64 KB per PE                                     Local SRAM per PE bytes
+ Total on-chip SRAM capacity              0 explicit SRAM in baseline                  8 MB global SRAM + 1 MB PE-local SRAM            Total on-chip SRAM bytes
+ SRAM bit width                           N/A                                          32-bit word                                      SRAM bit width
+ Number of SRAM banks                     0                                            2 global SRAM banks; 64 input and 64 weight      Global SRAM banks,               PE local SRAM
+                                                                                       banks per PE                                     input/weight banks
+ DRAM read volume and DRAM write          Fill from log: DRAM read GB / DRAM           Fill from log: DRAM read GB / DRAM               Printed by both metric sections.
+ volume (GB)                              write GB                                     write GB
+ DRAM bit width                           32-bit AXI-like data word                    32-bit AXI-like data word                        RDATA/WDATA are sc_uint<32>.
+ Number of DRAM banks                     1 functional DRAM model                      1 functional DRAM model                          Current DRAM is not bank-accurate.
+ SRAM read volume and SRAM write          0                                            Fill from log: SRAM read GB / SRAM               Optimized global SRAM counters are printed by the
+ volume (GB)                                                                           write GB                                         report.
+ Total memory access volume (GB)          Fill from log: Total memory access           Fill from log: Total memory access               DRAM + SRAM traffic.
+                                          GB                                           GB
+ Execution cycles                         Fill from log: SystemC timestamp             Fill from log: SystemC timestamp,                SystemC timestamp plus modeled accelerator cycle
+                                                                                       Modeled SRAM wait cycles,                        counters.
+                                                                                       Modeled systolic wait cycles
+ SystemC execution time                   Measure wall-clock runtime externally        Measure wall-clock runtime externally            Use shell time make trace-cat if needed.
+ NoC routing method                       Deterministic mesh routing                   Deterministic mesh routing with HOST con-        NoC routing method
+                                                                                       troller port
+ Multicast support                        Broadcast packet for shared input payloads   Row-wise systolic input broadcast                Multicast support
+ NoC protocol                             Custom valid/ack packet NoC                  Custom valid/ack packet NoC                      NoC protocol
+ NoC utilization                          Fill from log: NoC payload words,            Fill from log: NoC payload words,                Can be approximated as payload words per injected
+                                          NoC flits injected                           NoC flits injected                               flit/cycle.
+ NoC transfer latency                     Fill    from      log:     Average NoC       Fill from log: Average NoC injection             Measured at controller packet injection interface.
+                                          injection latency cycles/flit                latency cycles/flit
+ Dataflow design                          HW4-style controller-staged PE dispatch      SRAM-resident FC with two 2 × 4 systolic         Dataflow design
+                                                                                       MVM sub-arrays
+ Time breakdown of different operations   DMA + NoC + PE compute, mostly sequen-       DMA, SRAM, NoC, systolic compute, write-         Use printed DMA, SRAM, NoC, and systolic coun
+                                          tial                                         back with partial overlap                        ters.
+ Overlap of computation, communication,   Limited overlap                              FC weight DMA-to-SRAM prefetch overlaps          Overlap
+ and memory access                                                                     current tile compute
+ Other design-specific metrics            AXI4-like DMA replaces ROM access            DMA-to-SRAM descriptors, bounded 8-word          Highlights hardware meaning of optimized storage
+                                                                                       controller tile registers, PE-local SRAM, non-
+                                                                                       linear module
+                     VII. C ONCLUSION
+   The baseline verifies the functional correctness of replac-
+ing ROM accesses with AXI4-like DMA and DRAM while
+preserving the HW4 computation structure. The optimized
+design improves hardware realism and FC performance by
+introducing explicit SRAM hierarchy, DMA-to-SRAM trans-
+fers, bounded controller registers, and PE-level systolic MVM
+mapping. The end-of-run metric report allows the comparison
+table to be filled directly from SystemC execution logs.
+
