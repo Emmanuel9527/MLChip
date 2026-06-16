@@ -165,6 +165,9 @@ SC_MODULE(Controller)
     static const int PE_MACS_PER_CYCLE = 64;
     static const int SYSTOLIC_INPUT_TILE_WORDS = 4096;
     static const int CONTROLLER_FC_TILE_REGISTER_WORDS = SYSTOLIC_OUTPUTS_PER_TILE;
+    static const int OPTIMIZED_CLOCK_PERIOD_NS = 10;
+    static const int OPTIMIZED_DRAM_BIT_WIDTH = 32;
+    static const int OPTIMIZED_DRAM_BANKS = 1;
 
     vector<float> make_fc_tile_register(int words,
                                         const string &name,
@@ -2097,11 +2100,22 @@ SC_MODULE(Controller)
         unsigned long long total_memory_bytes =
             dram_read_bytes + dram_write_bytes +
             sram_read_bytes + sram_write_bytes;
+        unsigned long long execution_cycles =
+            (unsigned long long)(sc_time_stamp().to_seconds() /
+                                 ((double)OPTIMIZED_CLOCK_PERIOD_NS * 1.0e-9) +
+                                 0.5);
         double avg_noc_injection_latency =
             (optimized_noc_tx_flits == 0)
                 ? 0.0
                 : (double)optimized_noc_tx_cycles /
                       (double)optimized_noc_tx_flits;
+        unsigned long long noc_payload_capacity_words =
+            optimized_noc_tx_flits * (unsigned long long)PACKED_FLIT_WORDS;
+        double noc_payload_utilization =
+            (noc_payload_capacity_words == 0)
+                ? 0.0
+                : (double)optimized_noc_payload_words * 100.0 /
+                      (double)noc_payload_capacity_words;
         cout << "========== Optimized Design Metrics ==========" << endl;
         cout << "Number of PEs: " << WORKER_COUNT << endl;
         cout << "MAC units per PE: " << PE_MACS_PER_CYCLE << endl;
@@ -2125,12 +2139,19 @@ SC_MODULE(Controller)
         cout << "DRAM write bytes: " << dram_write_bytes << endl;
         cout << "DRAM read GB: " << ((double)dram_read_bytes / 1.0e9) << endl;
         cout << "DRAM write GB: " << ((double)dram_write_bytes / 1.0e9) << endl;
+        cout << "DRAM bit width: " << OPTIMIZED_DRAM_BIT_WIDTH << endl;
+        cout << "Number of DRAM banks: " << OPTIMIZED_DRAM_BANKS
+             << " functional model" << endl;
         cout << "SRAM read bytes: " << sram_read_bytes << endl;
         cout << "SRAM write bytes: " << sram_write_bytes << endl;
         cout << "SRAM read GB: " << ((double)sram_read_bytes / 1.0e9) << endl;
         cout << "SRAM write GB: " << ((double)sram_write_bytes / 1.0e9) << endl;
         cout << "Total memory access GB: "
              << ((double)total_memory_bytes / 1.0e9) << endl;
+        cout << "Execution cycles estimated from SystemC time: "
+             << execution_cycles << endl;
+        cout << "Clock period ns: " << OPTIMIZED_CLOCK_PERIOD_NS << endl;
+        cout << "SystemC timestamp: " << sc_time_stamp() << endl;
         cout << "NoC payload words: " << optimized_noc_payload_words << endl;
         cout << "NoC packets injected by Controller: "
              << optimized_noc_packets << endl;
@@ -2138,8 +2159,14 @@ SC_MODULE(Controller)
              << optimized_noc_tx_flits << endl;
         cout << "NoC injection cycles: "
              << optimized_noc_tx_cycles << endl;
+        cout << "NoC payload capacity words: "
+             << noc_payload_capacity_words << endl;
+        cout << "NoC payload utilization (%): "
+             << noc_payload_utilization << endl;
         cout << "Average NoC injection latency cycles/flit: "
              << avg_noc_injection_latency << endl;
+        cout << "NoC transfer latency metric: Controller injection cycles/flit"
+             << endl;
         cout << "NoC routing method: deterministic mesh routing with HOST controller port" << endl;
         cout << "Multicast support: row-wise systolic input broadcast" << endl;
         cout << "NoC protocol: custom valid/ack packet NoC" << endl;
@@ -2160,7 +2187,7 @@ SC_MODULE(Controller)
         cout << "Estimated systolic utilization (%): " << utilization << endl;
         cout << "Dataflow design: SRAM-resident FC with two 2x4 systolic MVM sub-arrays" << endl;
         cout << "Overlap: FC weight DMA-to-SRAM prefetch overlaps current tile compute through ping-pong buffers" << endl;
-        cout << "SystemC timestamp: " << sc_time_stamp() << endl;
+        cout << "SystemC wall-clock execution time: measure externally with /usr/bin/time -p make trace-cat or make trace-dog" << endl;
         cout << "FC optimization: original PE0..PE15 form a 4x4 systolic-style array with SRAM input, weight, bias, psum, and output buffers" << endl;
         cout << "==============================================" << endl;
         global_sram.print_metrics("Global Scratchpad");

@@ -75,6 +75,9 @@ SC_MODULE(Controller)
     static const int DMA_PROGRESS_INTERVAL = 1000000;
     static const int PACKET_PROGRESS_FLITS = 50000;
     static const int BASELINE_PE_MACS_PER_CYCLE = 64;
+    static const int BASELINE_CLOCK_PERIOD_NS = 10;
+    static const int BASELINE_DRAM_BIT_WIDTH = 32;
+    static const int BASELINE_DRAM_BANKS = 1;
 
     // Monotonic id used to label jobs sent to PEs.
     int next_job_id;
@@ -1056,11 +1059,26 @@ SC_MODULE(Controller)
         unsigned long long dram_read_bytes = baseline_dram_read_words * 4ull;
         unsigned long long dram_write_bytes = baseline_dram_write_words * 4ull;
         unsigned long long dram_total_bytes = dram_read_bytes + dram_write_bytes;
+        unsigned long long sram_read_bytes = 0;
+        unsigned long long sram_write_bytes = 0;
+        unsigned long long total_memory_bytes =
+            dram_total_bytes + sram_read_bytes + sram_write_bytes;
+        unsigned long long execution_cycles =
+            (unsigned long long)(sc_time_stamp().to_seconds() /
+                                 ((double)BASELINE_CLOCK_PERIOD_NS * 1.0e-9) +
+                                 0.5);
         double avg_noc_injection_latency =
             (baseline_noc_tx_flits == 0)
                 ? 0.0
                 : (double)baseline_noc_tx_cycles /
                       (double)baseline_noc_tx_flits;
+        unsigned long long noc_payload_capacity_words =
+            baseline_noc_tx_flits * (unsigned long long)PACKED_FLIT_WORDS;
+        double noc_payload_utilization =
+            (noc_payload_capacity_words == 0)
+                ? 0.0
+                : (double)baseline_noc_payload_words * 100.0 /
+                      (double)noc_payload_capacity_words;
         unsigned long long pe_mac_ops = PE::total_mac_ops();
         unsigned long long pe_compute_cycles = PE::total_compute_cycles();
         unsigned long long pe_compute_capacity =
@@ -1088,6 +1106,8 @@ SC_MODULE(Controller)
         cout << "Total on-chip SRAM bytes: 0" << endl;
         cout << "SRAM bit width: N/A" << endl;
         cout << "SRAM banks: 0" << endl;
+        cout << "SRAM read words: 0" << endl;
+        cout << "SRAM write words: 0" << endl;
         cout << "DRAM read words: " << baseline_dram_read_words << endl;
         cout << "DRAM write words: " << baseline_dram_write_words << endl;
         cout << "DRAM read bytes: " << dram_read_bytes << endl;
@@ -1095,10 +1115,19 @@ SC_MODULE(Controller)
         cout << "DRAM total bytes: " << dram_total_bytes << endl;
         cout << "DRAM read GB: " << ((double)dram_read_bytes / 1.0e9) << endl;
         cout << "DRAM write GB: " << ((double)dram_write_bytes / 1.0e9) << endl;
-        cout << "SRAM read bytes: 0" << endl;
-        cout << "SRAM write bytes: 0" << endl;
+        cout << "DRAM bit width: " << BASELINE_DRAM_BIT_WIDTH << endl;
+        cout << "Number of DRAM banks: " << BASELINE_DRAM_BANKS
+             << " functional model" << endl;
+        cout << "SRAM read bytes: " << sram_read_bytes << endl;
+        cout << "SRAM write bytes: " << sram_write_bytes << endl;
+        cout << "SRAM read GB: " << ((double)sram_read_bytes / 1.0e9) << endl;
+        cout << "SRAM write GB: " << ((double)sram_write_bytes / 1.0e9) << endl;
         cout << "Total memory access GB: "
-             << ((double)dram_total_bytes / 1.0e9) << endl;
+             << ((double)total_memory_bytes / 1.0e9) << endl;
+        cout << "Execution cycles estimated from SystemC time: "
+             << execution_cycles << endl;
+        cout << "Clock period ns: " << BASELINE_CLOCK_PERIOD_NS << endl;
+        cout << "SystemC timestamp: " << sc_time_stamp() << endl;
         cout << "NoC payload words: " << baseline_noc_payload_words << endl;
         cout << "NoC packets injected by Controller: "
              << baseline_noc_packets << endl;
@@ -1106,14 +1135,29 @@ SC_MODULE(Controller)
              << baseline_noc_tx_flits << endl;
         cout << "NoC injection cycles: "
              << baseline_noc_tx_cycles << endl;
+        cout << "NoC payload capacity words: "
+             << noc_payload_capacity_words << endl;
+        cout << "NoC payload utilization (%): "
+             << noc_payload_utilization << endl;
         cout << "Average NoC injection latency cycles/flit: "
              << avg_noc_injection_latency << endl;
+        cout << "NoC transfer latency metric: Controller injection cycles/flit"
+             << endl;
         cout << "NoC routing method: deterministic mesh routing" << endl;
         cout << "Multicast support: broadcast packet for shared input payloads" << endl;
         cout << "NoC protocol: custom valid/ack packet NoC" << endl;
         cout << "AXI protocol: AXI4-like DMA memory interface" << endl;
         cout << "Dataflow design: HW4-style Controller-staged PE dispatch" << endl;
-        cout << "SystemC timestamp: " << sc_time_stamp() << endl;
+        cout << "Overlap of computation, communication, and memory access: none; "
+             << "baseline waits for each DMA/NoC/PE stage before the next stage"
+             << endl;
+        cout << "Time breakdown of different operations: baseline records total "
+             << "SystemC time, PE active compute cycles, DMA traffic, and NoC "
+             << "injection cycles; per-layer breakdown is not separately "
+             << "instrumented" << endl;
+        cout << "Other design-specific metrics: functional single-bank DRAM, "
+             << "no explicit SRAM hierarchy, 32-bit AXI data words carrying "
+             << "IEEE-754 float bits" << endl;
         cout << "=============================================" << endl;
     }
 
