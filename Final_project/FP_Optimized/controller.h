@@ -2167,7 +2167,7 @@ SC_MODULE(Controller)
              << avg_noc_injection_latency << endl;
         cout << "NoC transfer latency metric: Controller injection cycles/flit"
              << endl;
-        cout << "NoC routing method: deterministic mesh routing with HOST controller port" << endl;
+        cout << "NoC routing method: escape-adaptive minimal mesh routing with deterministic XY escape VC and HOST controller port" << endl;
         cout << "Multicast support: row-wise systolic input broadcast" << endl;
         cout << "NoC protocol: custom valid/ack packet NoC" << endl;
         cout << "AXI protocol: AXI4-like DMA memory interface" << endl;
